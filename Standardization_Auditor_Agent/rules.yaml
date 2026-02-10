@@ -1,0 +1,39 @@
+# 格式审计组规则配置文件 (rules.yaml)
+# 对应《分工明细》二、语义判定 - 阶段1：格式语义规则拆解与建模
+# 支持通过后台动态调整 (Admin Dashboard)
+
+# 1. 错别字红线规则
+typo_check:
+  max_typos_per_page_warning: 2    # 单页错别字红线
+  max_typos_total_warning: 10      # 全文错别字红线
+  critical_keywords:               # 关键术语 (遇到错写直接 Critical)
+    - "深度学习"
+    - "卷积神经网络"
+    - "TensorFlow"
+    - "Pydantic"
+
+# 2. 术语一致性规则
+terminology_check:
+  # 定义标准术语及其允许的变体。如果不一致将触发 Warning。
+  # 格式: 标准术语: [允许的变体列表]
+  terms:
+    "深度学习": ["Deep Learning"]  # 允许中文或首字母大写英文
+    "卷积神经网络": ["CNN"]
+    "数据挖掘": ["Data Mining"]
+    "人工智能": ["AI", "Artificial Intelligence"]
+    "置信度": ["confidence"]
+  
+  # 明确禁止的写法 (用于生成建议)
+  forbidden_variants:
+    "Deep Learning": ["deep-learning", "deep learning"] # 禁止全小写或连字符
+    "CNN": ["C.N.N."]
+
+# 3. 标点符号规则
+punctuation_check:
+  allow_mixed_punctuation: false   # 是否允许中英文标点混用 (默认 False)
+  check_citation_position: true    # 检查引用标注是否在标点符号内/外 (根据规范)
+
+# 4. 引用格式语义规则
+citation_check:
+  style: "IEEE"                    # 目标引用风格: "IEEE" (如 [1]) 或 "APA" (如 (Wang, 2023))
+  check_reference_matching: true   # 是否校验正文引用与参考文献列表的匹配性
