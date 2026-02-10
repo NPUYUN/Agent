@@ -1,4 +1,5 @@
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from typing import Optional
 from config import GEMINI_MODEL_NAME, GOOGLE_API_KEY, SYSTEM_PROMPT
 
@@ -12,13 +13,11 @@ class GeminiClient:
             # 在实际部署中，可能需要抛出警告或错误，
             # 但为了本地开发不阻塞，这里暂时允许为空，调用时会报错
             print("Warning: GOOGLE_API_KEY is not set.")
+            self.client = None
         else:
-            genai.configure(api_key=api_key)
+            self.client = genai.Client(api_key=api_key)
         
-        self.model = genai.GenerativeModel(
-            model_name=GEMINI_MODEL_NAME,
-            system_instruction=SYSTEM_PROMPT
-        )
+        self.model_name = GEMINI_MODEL_NAME
 
     async def scan_document(self, content: str, temperature: float = 0.1) -> str:
         """
@@ -31,18 +30,23 @@ class GeminiClient:
         Returns:
             模型生成的原始文本响应
         """
+        if not self.client:
+            print("Gemini API Error: Client not initialized (missing API key).")
+            return ""
+
         try:
             # 针对长文档优化配置
-            generation_config = genai.types.GenerationConfig(
+            config = types.GenerateContentConfig(
+                system_instruction=SYSTEM_PROMPT,
                 temperature=temperature,
                 max_output_tokens=8192, # Flash 支持较长输出
             )
             
-            # 使用异步生成（如果 SDK 支持 async，目前 google-generativeai 主要为同步/asyncio 封装）
-            # 这里演示标准的异步调用方式
-            response = await self.model.generate_content_async(
-                content,
-                generation_config=generation_config
+            # 使用异步生成
+            response = await self.client.aio.models.generate_content(
+                model=self.model_name,
+                contents=content,
+                config=config
             )
             
             return response.text
