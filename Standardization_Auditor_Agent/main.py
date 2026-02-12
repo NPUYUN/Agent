@@ -1,8 +1,14 @@
+import os
+import sys
 import time
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+current_dir = os.path.dirname(os.path.abspath(__file__))
+if current_dir not in sys.path:
+    sys.path.insert(0, current_dir)
+
 from models import AuditRequest, AuditResponse, AgentInfo, AuditResult, ResourceUsage, AuditLevel
 from core.layout_analysis import LayoutAnalyzer
 from core.semantic_check import SemanticChecker
@@ -153,6 +159,15 @@ async def audit_paper(request: AuditRequest):
 async def health_check():
     return {"status": "healthy"}
 
+@app.get("/")
+async def root():
+    return {
+        "status": "ok",
+        "message": "Standardization Auditor Agent is running",
+        "docs": "/docs",
+        "health": "/health"
+    }
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="127.0.0.1", port=8000)
