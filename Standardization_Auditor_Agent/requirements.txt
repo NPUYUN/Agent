@@ -6,6 +6,7 @@ opencv-python-headless==4.9.0.80
 httpx==0.26.0
 google-genai
 openai
+numpy>=1.26.0
 sqlalchemy>=2.0.0
 asyncpg>=0.29.0
 pyyaml>=6.0

@@ -11,6 +11,7 @@ if current_dir not in sys.path:
 
 from models import AuditRequest, AuditResponse, AgentInfo, AuditResult, ResourceUsage, AuditLevel
 from core.layout_analysis import LayoutAnalyzer
+from api.layout_routes import router as layout_router
 from core.semantic_check import SemanticChecker
 from core.database import db_manager, ReviewTask, TaskStatus
 from core.rule_engine import RuleEngine
@@ -35,6 +36,7 @@ async def lifespan(app: FastAPI):
     await db_manager.close()
 
 app = FastAPI(title=AGENT_NAME, version=AGENT_VERSION, lifespan=lifespan)
+app.include_router(layout_router)
 
 # 初始化核心组件
 layout_analyzer = LayoutAnalyzer()
