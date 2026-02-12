@@ -1,58 +1,96 @@
 from google import genai
 from google.genai import types
+from openai import AsyncOpenAI
 from typing import Optional
-from config import GEMINI_MODEL_NAME, GOOGLE_API_KEY, SYSTEM_PROMPT
+from config import (
+    GEMINI_MODEL_NAME, GOOGLE_API_KEY, SYSTEM_PROMPT,
+    QWEN_API_KEY, QWEN_BASE_URL, QWEN_MODEL_NAME, LLM_PROVIDER
+)
 
-class GeminiClient:
+class LLMClient:
     """
-    负责与 Google Gemini 模型交互的客户端封装。
-    专门用于处理长文档扫描任务，利用 Gemini 1.5 Flash 的长上下文能力。
+    统一的 LLM 客户端封装，支持 Google Gemini 和 Qwen (DashScope)。
+    根据 config.LLM_PROVIDER 动态切换后端。
     """
-    def __init__(self, api_key: str = GOOGLE_API_KEY):
-        if not api_key:
-            # 在实际部署中，可能需要抛出警告或错误，
-            # 但为了本地开发不阻塞，这里暂时允许为空，调用时会报错
-            print("Warning: GOOGLE_API_KEY is not set.")
-            self.client = None
-        else:
-            self.client = genai.Client(api_key=api_key)
+    def __init__(self):
+        self.provider = LLM_PROVIDER.lower()
         
-        self.model_name = GEMINI_MODEL_NAME
+        # 初始化 Gemini
+        if self.provider == "gemini":
+            if not GOOGLE_API_KEY:
+                print("Warning: GOOGLE_API_KEY is not set.")
+                self.gemini_client = None
+            else:
+                self.gemini_client = genai.Client(api_key=GOOGLE_API_KEY)
+            self.model_name = GEMINI_MODEL_NAME
+            
+        # 初始化 Qwen (OpenAI Compatible)
+        elif self.provider == "qwen":
+            if not QWEN_API_KEY:
+                print("Warning: QWEN_API_KEY is not set.")
+                self.qwen_client = None
+            else:
+                self.qwen_client = AsyncOpenAI(
+                    api_key=QWEN_API_KEY,
+                    base_url=QWEN_BASE_URL
+                )
+            self.model_name = QWEN_MODEL_NAME
+        
+        else:
+            print(f"Warning: Unknown LLM_PROVIDER {self.provider}")
 
     async def scan_document(self, content: str, temperature: float = 0.1) -> str:
         """
-        使用 Gemini 1.5 Flash 扫描长文档内容，执行格式审计。
-        
-        Args:
-            content: 论文切片或全文内容
-            temperature: 生成温度
-            
-        Returns:
-            模型生成的原始文本响应
+        扫描文档内容，执行格式审计。
         """
-        if not self.client:
-            print("Gemini API Error: Client not initialized (missing API key).")
+        if self.provider == "gemini":
+            return await self._scan_with_gemini(content, temperature)
+        elif self.provider == "qwen":
+            return await self._scan_with_qwen(content, temperature)
+        else:
+            return ""
+
+    async def _scan_with_gemini(self, content: str, temperature: float) -> str:
+        if not self.gemini_client:
+            print("Gemini API Error: Client not initialized.")
             return ""
 
         try:
-            # 针对长文档优化配置
             config = types.GenerateContentConfig(
                 system_instruction=SYSTEM_PROMPT,
                 temperature=temperature,
-                max_output_tokens=8192, # Flash 支持较长输出
+                max_output_tokens=8192,
             )
             
-            # 使用异步生成
-            response = await self.client.aio.models.generate_content(
+            response = await self.gemini_client.aio.models.generate_content(
                 model=self.model_name,
                 contents=content,
                 config=config
             )
-            
             return response.text
-            
         except Exception as e:
-            # 记录错误日志
             print(f"Gemini API Error: {str(e)}")
-            # 返回空字符串或错误提示，避免阻断流程
             return ""
+
+    async def _scan_with_qwen(self, content: str, temperature: float) -> str:
+        if not self.qwen_client:
+            print("Qwen API Error: Client not initialized.")
+            return ""
+
+        try:
+            response = await self.qwen_client.chat.completions.create(
+                model=self.model_name,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": content}
+                ],
+                temperature=temperature,
+                max_tokens=2000, # Qwen max output limitation
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            print(f"Qwen API Error: {str(e)}")
+            return ""
+
+# 为了兼容旧代码，保留 GeminiClient 别名，但建议迁移到 LLMClient
+GeminiClient = LLMClient
