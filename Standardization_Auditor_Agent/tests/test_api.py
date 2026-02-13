@@ -1,3 +1,9 @@
+import sys
+import os
+
+# Add parent directory to sys.path to allow importing modules from the root
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from fastapi.testclient import TestClient
 from main import app
 from config import AGENT_NAME, AGENT_VERSION
@@ -13,7 +19,7 @@ def test_audit_valid_request():
     payload = {
         "request_id": "req_test_001",
         "metadata": {
-            "paper_id": "paper_123",
+            "paper_id": "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
             "paper_title": "Test Paper",
             "chunk_id": "chunk_1"
         },
@@ -49,7 +55,7 @@ def test_audit_invalid_request():
     # 缺少必需字段 (request_id)
     payload = {
         "metadata": {
-            "paper_id": "paper_123",
+            "paper_id": "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
             "paper_title": "Test Paper",
             "chunk_id": "chunk_1"
         },

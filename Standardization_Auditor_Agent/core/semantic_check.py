@@ -1,5 +1,5 @@
 from typing import List, Dict, Any, Optional
-from .llm_client import GeminiClient
+from .llm_client import LLMClient
 from .rule_engine import RuleEngine
 
 class TypoChecker:
@@ -79,7 +79,7 @@ class SemanticChecker:
     负责规则层面的格式校验，并与CV层结果融合
     """
     def __init__(self):
-        self.llm_client = GeminiClient()
+        self.llm_client = LLMClient()
         self.rule_engine = RuleEngine() # 动态规则引擎
         
         # 初始化子模块并注入规则

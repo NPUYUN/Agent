@@ -213,7 +213,7 @@ class VisualValidator:
 
     def _check_charts(self, elements: List[VisualElement]) -> List[Dict[str, Any]]:
         issues = []
-        captions = [e for e in elements if e.type == "title" and _is_caption(e.content)]
+        captions = [e for e in elements if e.type == "title" and is_caption(e.content)]
         images = [e for e in elements if e.type == "image"]
         text_refs = [e for e in elements if e.type == "text"]
         caption_nums = set()

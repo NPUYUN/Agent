@@ -11,17 +11,18 @@ Standardization_Auditor_Agent/
 ├── core/                       # 核心业务逻辑
 │   ├── database.py             # 数据库连接管理 (Async SQLAlchemy, ReviewTask模型)
 │   ├── rule_engine.py          # 动态规则加载与管理
-│   ├── layout_analysis.py      # 视觉/布局分析模块 (CV Layer)
-│   │   ├── PDFParser           # PDF解析与元素提取 (6大区域划分)
-│   │   ├── VisualValidator     # CV视觉校验 (图表/公式/标题/引用)
-│   │   └── AnchorGenerator     # 前端锚点生成 (精准BBox)
+│   ├── layout_analysis.py      # 视觉/布局分析主入口 (CV Layer)
+│   ├── layout_zones.py         # 区域划分逻辑 (6大区域)
+│   ├── layout_rules.py         # 布局校验规则
+│   ├── layout_payload.py       # 数据载荷构建
+│   ├── layout_frontend_adapter.py # 前端适配器 (锚点转换)
 │   ├── semantic_check.py       # 语义规则校验模块 (Semantic Layer)
 │   │   ├── TypoChecker         # 错别字红线判定 (>10 Warning)
 │   │   ├── TerminologyChecker  # 术语一致性校验
 │   │   ├── PunctuationChecker  # 标点符号校验
 │   │   ├── CitationChecker     # 引用格式语义校验
 │   │   └── SemanticChecker     # 语义校验入口
-│   └── llm_client.py           # Gemini 1.5 Flash 客户端 (长文档扫描)
+│   └── llm_client.py           # 统一 LLM 客户端 (支持 Gemini/Qwen)
 ├── utils/                      # 通用工具库
 │   └── logger.py               # 标准化日志模块
 ├── tests/                      # 测试用例
@@ -51,7 +52,7 @@ Standardization_Auditor_Agent/
 - **TerminologyChecker**: 术语一致性检查（如 "Deep Learning" 写法统一）。
 - **PunctuationChecker**: 杜绝中英文标点混用及位置错误。
 - **CitationChecker**: 引用风格（IEEE/APA）一致性及与参考文献的语义匹配。
-- **LLM Integration**: 集成 `Gemini 1.5 Flash` 辅助长文档扫描。
+- **LLM Integration**: 集成 `Gemini` / `Qwen` (Compatible Mode) 辅助长文档扫描。
 
 ### 3. 数据测试/标注 (Data Support) - 1人
 - **样本库搭建**: 收集≥200份样本（规范/单一问题/混合问题），覆盖所有审计维度。
@@ -82,12 +83,25 @@ pip install -r requirements.txt
 
 ### 3. 配置环境变量
 
-如需使用 Gemini 模型及数据库连接：
+支持 **Gemini** (Google) 和 **Qwen** (DashScope/Aliyun) 双模型切换。
 
 **Windows (PowerShell):**
 ```powershell
-$env:GOOGLE_API_KEY="your_api_key"
+# 基础配置
+$env:LOG_LEVEL="INFO"
 $env:DATABASE_URL="postgresql+asyncpg://user:pass@localhost/dbname"
+
+# LLM 选择 (gemini 或 qwen)
+$env:LLM_PROVIDER="qwen"
+
+# Qwen 配置 (推荐，兼容模式)
+$env:QWEN_API_KEY="sk-..."
+$env:QWEN_BASE_URL="https://dashscope.aliyuncs.com/compatible-mode/v1"
+$env:QWEN_MODEL_NAME="qwen-plus"
+
+# Gemini 配置 (备用)
+$env:GOOGLE_API_KEY="your_google_api_key"
+$env:GEMINI_MODEL_NAME="gemini-1.5-flash"
 ```
 
 ### 4. 运行 Agent
@@ -130,7 +144,7 @@ python main.py
   "request_id": "req_20231027_001",
   "agent_info": {
     "name": "Standardization_Auditor_Agent",
-    "version": "v1.1"
+    "version": "v1.2"
   },
   "result": {
     "score": 85,
@@ -151,5 +165,5 @@ python main.py
 - **编程语言**: Python 3.10.x
 - **Web框架**: FastAPI (必须支持 async)
 - **数据校验**: Pydantic V2 (强制校验)
-- **核心库**: PyMuPDF, OpenCV, Google Generative AI, SQLAlchemy (Async)
+- **核心库**: PyMuPDF, OpenCV, google-genai, openai, SQLAlchemy (Async)
 - **数据持久化**: 结果实时写入 PostgreSQL (`review_tasks` 表)
