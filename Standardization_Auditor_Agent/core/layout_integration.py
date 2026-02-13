@@ -1,5 +1,5 @@
 from typing import Dict, Any
-from core.layout_frontend_adapter import issues_to_frontend_payload
+from .layout_frontend_adapter import issues_to_frontend_payload
 
 
 def merge_layout_to_response(layout_result: Dict[str, Any]) -> Dict[str, Any]:

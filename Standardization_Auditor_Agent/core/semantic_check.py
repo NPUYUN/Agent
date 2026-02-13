@@ -1,4 +1,6 @@
 from typing import List, Dict, Any, Optional
+import asyncio
+from config import LLM_TIMEOUT_SEC
 from .llm_client import LLMClient
 from .rule_engine import RuleEngine
 
@@ -106,7 +108,13 @@ class SemanticChecker:
         # 2. LLM 辅助扫描 (Gemini 1.5 Flash)
         # 利用长上下文能力辅助扫描复杂格式问题
         # Ref: 分工明细 - LLM Scanner
-        llm_feedback = await self.llm_client.scan_document(content)
+        try:
+            llm_feedback = await asyncio.wait_for(
+                self.llm_client.scan_document(content),
+                timeout=LLM_TIMEOUT_SEC
+            )
+        except Exception:
+            llm_feedback = ""
         
         # 3. 结果融合与去重
         # 避免视觉层和语义层对同一问题的重复标注

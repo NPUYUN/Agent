@@ -1,6 +1,7 @@
 import os
 import sys
 import time
+import asyncio
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
@@ -98,7 +99,16 @@ async def audit_paper(request: AuditRequest):
     try:
         # 1. 视觉/布局分析
         logger.info("Starting layout analysis...")
-        layout_data = await layout_analyzer.analyze(request.payload.content)
+        try:
+            layout_data = await asyncio.wait_for(layout_analyzer.analyze(request.payload.content), timeout=5)
+        except asyncio.TimeoutError:
+            logger.error("Layout analysis timeout")
+            layout_data = {
+                "elements": [],
+                "layout_result": {"layout_issues": []},
+                "parse_errors": [{"error_type": "layout_timeout", "message": "layout analysis timeout"}],
+                "parse_report": {},
+            }
         
         # 2. 语义校验
         logger.info("Starting semantic check...")
@@ -106,7 +116,8 @@ async def audit_paper(request: AuditRequest):
         
         # 3. 构造返回结果
         score = semantic_result.get("score", 100)
-        issues = layout_data.get("layout_issues", []) + semantic_result.get("semantic_issues", [])
+        layout_issues = layout_data.get("layout_result", {}).get("layout_issues", [])
+        issues = layout_issues + semantic_result.get("semantic_issues", [])
 
         # 评分与评级逻辑
         audit_level = AuditLevel.INFO

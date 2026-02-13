@@ -29,6 +29,10 @@ def _bbox_from_rect(rect: Tuple[float, float, float, float]) -> List[float]:
     return [float(rect[0]), float(rect[1]), float(rect[2]), float(rect[3])]
 
 
+def _sort_blocks(blocks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return sorted(blocks, key=lambda b: (b.get("bbox", [0, 0, 0, 0])[1], b.get("bbox", [0, 0, 0, 0])[0]))
+
+
 def _text_from_line(line: Dict[str, Any]) -> str:
     spans = line.get("spans", [])
     return "".join([s.get("text", "") for s in spans]).strip()
@@ -86,7 +90,13 @@ class PDFParser:
                         font_sizes.append(size)
             body_size = _safe_median(font_sizes, default=10.0)
             reference_mode = False
-            text_blocks = [b for b in blocks if b.get("type") == 0]
+            if columns:
+                if len(columns) > 1:
+                    text_blocks = _sort_blocks(columns[0]) + _sort_blocks(columns[1])
+                else:
+                    text_blocks = _sort_blocks(columns[0])
+            else:
+                text_blocks = _sort_blocks([b for b in blocks if b.get("type") == 0])
             if not text_blocks:
                 elements.append(
                     VisualElement(

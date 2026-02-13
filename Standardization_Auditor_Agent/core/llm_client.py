@@ -13,13 +13,13 @@ class LLMClient:
     根据 config.LLM_PROVIDER 动态切换后端。
     """
     def __init__(self):
-        self.provider = LLM_PROVIDER.lower()
+        self.provider = LLM_PROVIDER.lower() if LLM_PROVIDER else "none"
         
         # 初始化 Gemini
         if self.provider == "gemini":
             if not GOOGLE_API_KEY:
-                print("Warning: GOOGLE_API_KEY is not set.")
                 self.gemini_client = None
+                self.provider = "none"
             else:
                 self.gemini_client = genai.Client(api_key=GOOGLE_API_KEY)
             self.model_name = GEMINI_MODEL_NAME
@@ -27,8 +27,8 @@ class LLMClient:
         # 初始化 Qwen (OpenAI Compatible)
         elif self.provider == "qwen":
             if not QWEN_API_KEY:
-                print("Warning: QWEN_API_KEY is not set.")
                 self.qwen_client = None
+                self.provider = "none"
             else:
                 self.qwen_client = AsyncOpenAI(
                     api_key=QWEN_API_KEY,
@@ -37,7 +37,7 @@ class LLMClient:
             self.model_name = QWEN_MODEL_NAME
         
         else:
-            print(f"Warning: Unknown LLM_PROVIDER {self.provider}")
+            self.provider = "none"
 
     async def scan_document(self, content: str, temperature: float = 0.1) -> str:
         """
@@ -52,7 +52,6 @@ class LLMClient:
 
     async def _scan_with_gemini(self, content: str, temperature: float) -> str:
         if not self.gemini_client:
-            print("Gemini API Error: Client not initialized.")
             return ""
 
         try:
@@ -68,13 +67,11 @@ class LLMClient:
                 config=config
             )
             return response.text
-        except Exception as e:
-            print(f"Gemini API Error: {str(e)}")
+        except Exception:
             return ""
 
     async def _scan_with_qwen(self, content: str, temperature: float) -> str:
         if not self.qwen_client:
-            print("Qwen API Error: Client not initialized.")
             return ""
 
         try:
@@ -88,8 +85,7 @@ class LLMClient:
                 max_tokens=2000, # Qwen max output limitation
             )
             return response.choices[0].message.content
-        except Exception as e:
-            print(f"Qwen API Error: {str(e)}")
+        except Exception:
             return ""
 
 # 为了兼容旧代码，保留 GeminiClient 别名，但建议迁移到 LLMClient

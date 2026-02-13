@@ -14,12 +14,13 @@ GEMINI_MODEL_NAME = "gemini-1.5-flash"
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")  # 从环境变量获取 API Key
 
 # Qwen 配置 (DashScope Compatible)
-QWEN_API_KEY = os.getenv("QWEN_API_KEY", "sk-e6a46e1940de419caf8e5b010954a7e3")
+QWEN_API_KEY = os.getenv("QWEN_API_KEY", "")
 QWEN_BASE_URL = os.getenv("QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
 QWEN_MODEL_NAME = os.getenv("QWEN_MODEL_NAME", "qwen-plus")
 
 # LLM Provider: "gemini" or "qwen"
-LLM_PROVIDER = os.getenv("LLM_PROVIDER", "qwen")
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "none")
+LLM_TIMEOUT_SEC = int(os.getenv("LLM_TIMEOUT_SEC", "8"))
 
 # 数据库配置
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+asyncpg://user:password@localhost/dbname")
