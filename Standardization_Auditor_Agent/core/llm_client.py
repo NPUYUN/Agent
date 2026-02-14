@@ -3,9 +3,10 @@ from google.genai import types
 from openai import AsyncOpenAI
 from typing import Optional
 from config import (
-    GEMINI_MODEL_NAME, GOOGLE_API_KEY, SYSTEM_PROMPT,
+    GEMINI_MODEL_NAME, GOOGLE_API_KEY,
     QWEN_API_KEY, QWEN_BASE_URL, QWEN_MODEL_NAME, LLM_PROVIDER
 )
+from core.prompts import SYSTEM_PROMPT_MAIN as SYSTEM_PROMPT
 
 class LLMClient:
     """

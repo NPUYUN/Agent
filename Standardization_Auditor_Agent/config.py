@@ -23,22 +23,13 @@ LLM_PROVIDER = os.getenv("LLM_PROVIDER", "none")
 LLM_TIMEOUT_SEC = int(os.getenv("LLM_TIMEOUT_SEC", "8"))
 
 # 数据库配置
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+asyncpg://user:password@localhost/dbname")
+# Remote (Default)
+# DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+asyncpg://user:password@localhost/dbname")
+# Local (Testing) - User: postgres, Pass: Ycc20060308, DB: agent_db
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+asyncpg://postgres:Ycc20060308@localhost:5432/agent_db")
 
-# 专属System Prompt
-SYSTEM_PROMPT = """
-你是一位严苛的期刊排版编辑，负责对软件工程硕士论文进行格式审计。
-你的任务是重点扫描排版细节错误，包括但不限于：
-1. 引用一致性
-2. 图表标号与引用
-3. 标题层级
-4. 术语一致性
-5. 公式规范
-6. 标点符号中英文混用
-7. 列表符号统一
-
-请基于提供的视觉布局信息和文本内容，严格指出不符合规范的地方。
-"""
+# 专属System Prompt (Moved to core/prompts.py)
+# SYSTEM_PROMPT = "..."
 
 # 专属Tags
 class AuditTag(str, Enum):
