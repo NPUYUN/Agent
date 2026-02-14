@@ -60,6 +60,22 @@ async def general_exception_handler(request: Request, exc: Exception):
         content={"detail": str(exc), "message": "Internal server error"}
     )
 
+def _collect_tags(issues):
+    tag_set = set()
+    for issue in issues:
+        issue_type = issue.get("issue_type", "")
+        if not issue_type:
+            continue
+        if "Citation" in issue_type:
+            tag_set.add(AuditTag.CITATION_INCONSISTENCY.value)
+        if issue_type == "Label_Missing":
+            tag_set.add(AuditTag.LABEL_MISSING.value)
+        if issue_type == "Hierarchy_Fault":
+            tag_set.add(AuditTag.HIERARCHY_FAULT.value)
+        if "Punctuation" in issue_type:
+            tag_set.add(AuditTag.PUNCTUATION_ERROR.value)
+    return list(tag_set)
+
 async def save_result_to_db(request: AuditRequest, response: AuditResponse, status: TaskStatus, error_msg: str = None):
     """
     异步写入 review_tasks 表，符合开发规范的数据持久化要求
@@ -115,9 +131,9 @@ async def audit_paper(request: AuditRequest):
         semantic_result = await semantic_checker.check(request.payload.content, layout_data)
         
         # 3. 构造返回结果
-        score = semantic_result.get("score", 100)
         layout_issues = layout_data.get("layout_result", {}).get("layout_issues", [])
         issues = layout_issues + semantic_result.get("semantic_issues", [])
+        score = semantic_checker._calculate_score(issues)
 
         # 评分与评级逻辑
         audit_level = AuditLevel.INFO
@@ -133,7 +149,7 @@ async def audit_paper(request: AuditRequest):
             suggestion = "建议根据详细报告进行修改。"
             
         # 使用规范定义的专属Tags
-        tags = [AuditTag.CITATION_INCONSISTENCY.value, AuditTag.LABEL_MISSING.value]
+        tags = _collect_tags(issues) or [AuditTag.CITATION_INCONSISTENCY.value, AuditTag.LABEL_MISSING.value]
         
         # 计算耗时
         latency_ms = int((time.time() - start_time) * 1000)
