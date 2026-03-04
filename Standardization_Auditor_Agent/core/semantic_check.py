@@ -3,6 +3,7 @@ import asyncio
 import base64
 import math
 import re
+import json
 from config import LLM_TIMEOUT_SEC
 from .llm_client import LLMClient
 
@@ -251,7 +252,9 @@ class PunctuationChecker:
             # Check for Citation AFTER Punctuation (Error: .[1])
             # Correct: [1]. or [1],
             # Pattern: Punctuation followed by Citation
-            punct_cite_pattern = re.compile(r"[，。,\.]\s*(\[\d+\])")
+            # Use positive lookbehind for punctuation to capture overlapping matches if needed, but simple iteration is usually fine
+            # Allow optional space between punctuation and citation
+            punct_cite_pattern = re.compile(r"([，。,\.])\s*(\[\d+\])")
             
             for m in punct_cite_pattern.finditer(content):
                 issues.append({
@@ -417,11 +420,44 @@ class SemanticChecker:
         # 2. LLM 辅助扫描 (Gemini 1.5 Flash)
         # 利用长上下文能力辅助扫描复杂格式问题
         # Ref: 分工明细 - LLM Scanner
+        llm_feedback = ""
         try:
-            llm_feedback = await asyncio.wait_for(
+            raw_response = await asyncio.wait_for(
                 self.llm_client.scan_document(text_content),
                 timeout=LLM_TIMEOUT_SEC
             )
+            
+            if raw_response:
+                # Try to parse JSON output
+                cleaned = raw_response.strip()
+                if cleaned.startswith("```json"):
+                    cleaned = cleaned[7:]
+                if cleaned.endswith("```"):
+                    cleaned = cleaned[:-3]
+                cleaned = cleaned.strip()
+                
+                try:
+                    parsed = json.loads(cleaned)
+                    llm_issues = parsed.get("issues", [])
+                    llm_feedback = parsed.get("summary", "")
+                    
+                    # Merge LLM issues into main issues list
+                    for issue in llm_issues:
+                        # Normalize issue structure
+                        normalized_issue = {
+                            "issue_type": issue.get("issue_type", "LLM_Feedback"),
+                            "severity": issue.get("severity", "Warning"),
+                            "evidence": issue.get("evidence", "LLM Detection"),
+                            "message": issue.get("message", issue.get("description", "")),
+                            "suggestion": issue.get("suggestion", ""),
+                            "source": "LLM"
+                        }
+                        issues.append(normalized_issue)
+                        
+                except json.JSONDecodeError:
+                    # Fallback to raw text if not valid JSON
+                    llm_feedback = raw_response
+                    
         except Exception:
             llm_feedback = ""
         

@@ -4,9 +4,9 @@ import asyncio
 from typing import Dict, Any
 from sqlalchemy import select
 from .database import db_manager, ExpertComment
-from utils.logger import get_logger
+from utils.logger import setup_logger
 
-logger = get_logger(__name__)
+logger = setup_logger(__name__)
 
 class RuleEngine:
     """

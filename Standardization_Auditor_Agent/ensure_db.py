@@ -65,6 +65,9 @@ async def ensure_database_exists():
             try:
                 await db_conn.execute('CREATE EXTENSION IF NOT EXISTS vector;')
                 print("✅ Extension 'vector' installed/verified.")
+            except Exception as e:
+                print(f"⚠️ Failed to install 'vector' extension on DB server: {e}")
+                print("⚠️ Proceeding without DB-side vector support.")
             finally:
                 await db_conn.close()
         else:
