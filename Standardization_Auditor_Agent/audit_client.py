@@ -20,18 +20,58 @@ def create_sample_pdf(filename="sample_audit.pdf"):
     page = doc.new_page()
     
     # Add some content that triggers audit rules
+    
     # 1. Title
-    page.insert_text((50, 50), "1. Introduction", fontsize=18)
-    # 2. Text referencing a missing chart
+    page.insert_text((50, 40), "1. Introduction", fontsize=18)
+
+    # 2. Semantic Layer Triggers
+    
+    # 2.1 TypoChecker (Critical Keywords)
+    # rules.yaml: critical_keywords=["TensorFlow", "Pydantic"]
+    page.insert_text((50, 70), "We use TensorFlw framework for implementation.", fontsize=11)
+    page.insert_text((50, 85), "The Pydantc library is used for validation.", fontsize=11)
+    
+    # 2.2 TerminologyChecker (Consistency & Forbidden)
+    # rules.yaml: "Deep Learning": ["Deep Learning"], forbidden: ["deep-learning"]
+    page.insert_text((50, 110), "Deep Learning is a subset of AI.", fontsize=11)
+    page.insert_text((50, 125), "However, deep-learning models are complex.", fontsize=11) # Forbidden
+    page.insert_text((50, 140), "DEEP LEARNING requires GPU.", fontsize=11) # Inconsistent case
+
+    # 2.3 PunctuationChecker (Mixed Punctuation & Citation Position)
+    # Mixed punctuation
     try:
-        page.insert_text((50, 100), "如图1所示，结果显著。", fontsize=11, fontname="china-s")
-        page.insert_text((50, 200), "图1 测试图表", fontsize=10, fontname="china-s")
+        # Try inserting Chinese with English punctuation
+        page.insert_text((50, 165), "这是一个测试句子.", fontsize=11, fontname="china-s") 
     except:
-        page.insert_text((50, 100), "Figure 1 shows significant results.", fontsize=11)
-        page.insert_text((50, 200), "Figure 1 Test Chart", fontsize=10)
+        # Fallback: English with Chinese punctuation (if font allows, otherwise just skip or use unicode)
+        # Note: standard fonts might not show Chinese full-width period "。" correctly without CJK font.
+        # We will try to use it anyway.
+        page.insert_text((50, 165), "This is a test sentence\u3002", fontsize=11, fontname="helv") 
+
+    # Citation Position Inconsistency
+    page.insert_text((50, 190), "Reference one [1].", fontsize=11) # Correct (usually)
+    page.insert_text((50, 205), "Reference two .[2]", fontsize=11) # Incorrect position
+
+    # 2.4 CitationChecker (Style Inconsistency)
+    page.insert_text((50, 230), "Another method is proposed by (Wang, 2023).", fontsize=11) # APA style mixed with IEEE [1]
+    
+    # 3. Layout Triggers (Existing)
+    # Text referencing a missing chart
+    try:
+        page.insert_text((50, 260), "如图1所示，结果显著。", fontsize=11, fontname="china-s")
+        page.insert_text((50, 280), "图1 测试图表", fontsize=10, fontname="china-s")
+    except:
+        page.insert_text((50, 260), "Figure 1 shows significant results.", fontsize=11)
+        page.insert_text((50, 280), "Figure 1 Test Chart", fontsize=10)
         
-    # 3. Formula without reference
-    page.insert_text((50, 250), "E = mc^2 (1)", fontsize=11)
+    # Formula without reference
+    page.insert_text((50, 310), "E = mc^2 (1)", fontsize=11)
+    
+    # 4. References Section (Incomplete)
+    page.insert_text((50, 350), "References", fontsize=14)
+    page.insert_text((50, 370), "[1] A. Smith, 'Paper Title', 2020.", fontsize=10)
+    # [2] is missing
+    # (Wang, 2023) is missing
     
     doc.save(filename)
     doc.close()

@@ -29,7 +29,15 @@ rule_engine = RuleEngine()
 async def lifespan(app: FastAPI):
     # 启动时：连接数据库
     logger.info("Starting up: Connecting to database...")
-    # await db_manager.engine.connect() # SQLAlchemy async engine is lazy
+    try:
+        async with db_manager.engine.connect() as conn:
+            from sqlalchemy import text
+            await conn.execute(text("SELECT 1"))
+        logger.info("Database connection established successfully.")
+    except Exception as e:
+        logger.error(f"Failed to connect to database: {e}")
+        logger.warning("Application started but database is unreachable. Functionality will be limited.")
+    
     logger.info("Rules loaded: %s", list(rule_engine.rules.keys()))
     yield
     # 关闭时：断开数据库

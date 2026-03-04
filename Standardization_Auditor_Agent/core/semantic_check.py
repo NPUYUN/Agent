@@ -3,6 +3,8 @@ import asyncio
 import base64
 import math
 import re
+import difflib
+from collections import Counter
 from config import LLM_TIMEOUT_SEC
 from .llm_client import LLMClient
 from .rule_engine import RuleEngine
@@ -89,6 +91,7 @@ def _parse_author_year(citation: str) -> Optional[Dict[str, str]]:
         return None
     return {"author": author_match.group(1).lower(), "year": year_match.group(0)}
 
+
 class TypoChecker:
     """
     语义判定 - 错别字红线判定
@@ -101,14 +104,74 @@ class TypoChecker:
 
     def check(self, content: str, issues: List[Dict]):
         """
-        1. 集成中文分词/错别字检测工具
+        1. 集成中文分词/错别字检测工具 (简化实现: 基于关键术语和规则)
         2. 上下文语义纠错 (排除专业名词歧义)
         3. 红线触发逻辑: 全文>10个 -> Warning; 关键术语错字 -> Critical
         """
-        # 模拟检测逻辑
-        # if typo_count > self.max_typos_total:
-        #     issues.append({...})
-        pass
+        if not content:
+            return
+
+        typo_count = 0
+        
+        # Check critical keywords for typos (fuzzy matching)
+        # Simple tokenization for checking
+        words = re.findall(r'\b\w+\b', content)
+        
+        # Optimization: only check unique words to save time
+        unique_words = set(words)
+        
+        for keyword in self.critical_keywords:
+            # Check for exact keyword presence (to ensure we don't flag the keyword itself as a typo of itself)
+            # Actually we want to find *incorrect* versions.
+            
+            # Simple approach: find close matches in the text that are NOT the keyword itself
+            # We look for words that are similar to the keyword but not identical.
+            # Using difflib.get_close_matches
+            
+            # Note: This is computationally expensive for large texts. 
+            # We restrict to words of similar length.
+            
+            # Filter candidates: words that start with the same letter and have similar length
+            candidates = [
+                w for w in unique_words 
+                if abs(len(w) - len(keyword)) <= 2 and w.lower() != keyword.lower()
+            ]
+            
+            matches = difflib.get_close_matches(keyword, candidates, n=3, cutoff=0.8)
+            
+            for match in matches:
+                # Double check: if it's a valid variant (e.g. plural), maybe skip?
+                # For now, treat as potential typo if it's a critical keyword.
+                # To reduce false positives, we might need a whitelist, but let's stick to the prompt.
+                
+                issues.append({
+                    "issue_type": "Critical_Keyword_Typo",
+                    "severity": "Critical",
+                    "evidence": match,
+                    "message": f"关键术语 '{keyword}' 可能存在拼写错误: '{match}'",
+                })
+                typo_count += 1
+
+        # Generic typo check (simulated / placeholder for integration with external tool)
+        # Here we just check for a few common errors or repeated words
+        repeated_words = re.findall(r'\b(\w+)\s+\1\b', content, flags=re.IGNORECASE)
+        for word in repeated_words:
+            issues.append({
+                "issue_type": "Repeated_Word",
+                "severity": "Warning",
+                "evidence": f"{word} {word}",
+                "message": f"发现重复单词: '{word}'",
+            })
+            typo_count += 1
+
+        if typo_count > self.max_typos_total:
+            issues.append({
+                "issue_type": "Typo_Limit_Exceeded",
+                "severity": "Warning",
+                "evidence": f"Total count: {typo_count}",
+                "message": f"全文错别字/疑似错误数量超过阈值 ({self.max_typos_total})",
+            })
+
 
 class TerminologyChecker:
     """
@@ -128,21 +191,39 @@ class TerminologyChecker:
         """
         if not content:
             return
+        
+        # Check for defined terms consistency
         for canonical, variants in self.terms.items():
-            forms = [canonical] + list(variants or [])
-            found = []
-            for form in forms:
-                if _term_found(content, form):
-                    found.append(form)
-            if len({_normalize_term_key(f) for f in found}) > 1:
-                issues.append(
-                    {
-                        "issue_type": "Terminology_Inconsistent",
-                        "severity": "Warning",
-                        "evidence": ", ".join(found),
-                        "message": f"术语写法不一致，建议统一为：{canonical}",
-                    }
-                )
+            # Gather all occurrences of the term (canonical + variants)
+            # We want to find *any* occurrence that looks like the term (case-insensitive)
+            # and see if they are consistent with the canonical form.
+            
+            # Simple approach: find all case-insensitive matches of the canonical term
+            # If we find matches that are NOT in the allowed variants list, flag them.
+            
+            # Regex for the term (case insensitive)
+            escaped_term = re.escape(canonical)
+            # Matches containing the term text, capturing the actual usage
+            matches = re.findall(r'\b' + escaped_term + r'\b', content, flags=re.IGNORECASE)
+            
+            allowed_forms = {canonical}
+            if variants:
+                allowed_forms.update(variants)
+            
+            inconsistent_usages = set()
+            for usage in matches:
+                if usage not in allowed_forms:
+                    inconsistent_usages.add(usage)
+            
+            if inconsistent_usages:
+                 issues.append({
+                    "issue_type": "Terminology_Inconsistent",
+                    "severity": "Warning",
+                    "evidence": ", ".join(inconsistent_usages),
+                    "message": f"术语 '{canonical}' 写法不一致或不规范。发现: {', '.join(inconsistent_usages)}。建议统一为: {canonical}",
+                })
+
+        # Check for explicitly forbidden variants
         for canonical, forbidden in self.forbidden_variants.items():
             found_forbidden = []
             for form in forbidden or []:
@@ -154,9 +235,10 @@ class TerminologyChecker:
                         "issue_type": "Terminology_Forbidden",
                         "severity": "Warning",
                         "evidence": ", ".join(found_forbidden),
-                        "message": f"检测到不规范术语写法，建议使用：{canonical}",
+                        "message": f"检测到不规范术语写法 '{', '.join(found_forbidden)}'，建议使用：{canonical}",
                     }
                 )
+
 
 class PunctuationChecker:
     """
@@ -166,13 +248,68 @@ class PunctuationChecker:
     def __init__(self, config: Dict[str, Any]):
         self.config = config
         self.allow_mixed = config.get("allow_mixed_punctuation", False)
+        self.check_citation_position = config.get("check_citation_position", True)
 
     def check(self, content: str, layout_data: Dict[str, Any], issues: List[Dict]):
         """
         1. 杜绝中英文标点混用
         2. 标点位置错误 (如引用标注在标点外)
         """
-        pass
+        if not content:
+            return
+
+        # 1. Mixed punctuation check
+        if not self.allow_mixed:
+            # Check for Chinese characters followed by English punctuation
+            # Chinese char range: \u4e00-\u9fa5
+            # English punctuation: , . ? ! : ; ( )
+            chinese_with_eng_punct = re.findall(r'[\u4e00-\u9fa5][,.\?!:;]', content)
+            if chinese_with_eng_punct:
+                 issues.append({
+                    "issue_type": "Punctuation_Mixed",
+                    "severity": "Warning",
+                    "evidence": ", ".join(chinese_with_eng_punct[:5]) + ("..." if len(chinese_with_eng_punct)>5 else ""),
+                    "message": "检测到中文文本使用英文标点",
+                })
+
+            # Check for English words followed by Chinese punctuation
+            # English word: [a-zA-Z0-9]+
+            # Chinese punctuation: ， 。 ？ ！ ： ； （ ）
+            eng_with_chinese_punct = re.findall(r'[a-zA-Z0-9]+[，。？！：；（）]', content)
+            if eng_with_chinese_punct:
+                issues.append({
+                    "issue_type": "Punctuation_Mixed",
+                    "severity": "Warning",
+                    "evidence": ", ".join(eng_with_chinese_punct[:5]) + ("..." if len(eng_with_chinese_punct)>5 else ""),
+                    "message": "检测到英文文本使用中文标点",
+                })
+
+        # 2. Citation position check
+        # Check if citation [x] is AFTER the period/comma. 
+        # IEEE usually prefers [x] before punctuation? Actually IEEE style manual says:
+        # "Reference numbers are set flush left and form a column of their own, hanging out beyond the body of the reference. The reference numbers are on the line, enclosed in square brackets. In all text references to bibliography numbers, use the square brackets, e.g., '...as shown by [5], ...'"
+        # "Grammatically, they may be treated as if they were footnote numbers, e.g., '...as shown by Brown [4], [5]; as mentioned earlier [2], [4]–[7], [9]...'"
+        # "Punctuation follows the bracket [3]." -> So [1]. is correct.
+        
+        # However, some Chinese standards require [1] to be before punctuation if it cites the sentence.
+        # Let's assume the rule is: Citation should be consistent.
+        
+        # Let's check for [x]. vs .[x]
+        # Regex for [number]
+        cit_pattern = r'\[\d+(?:[-,]\d+)*\]'
+        
+        # [x]. pattern
+        cit_before_dot = re.findall(cit_pattern + r'[.。,，]', content)
+        # .[x] pattern
+        cit_after_dot = re.findall(r'[.。,，]' + cit_pattern, content)
+        
+        if cit_before_dot and cit_after_dot:
+             issues.append({
+                "issue_type": "Citation_Position_Inconsistent",
+                "severity": "Warning",
+                "evidence": f"Found both '[x].' ({len(cit_before_dot)}) and '.[x]' ({len(cit_after_dot)})",
+                "message": "引用标注位置不一致 (部分在标点前，部分在标点后)",
+            })
 
 class CitationChecker:
     """
