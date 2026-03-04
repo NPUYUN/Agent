@@ -9,6 +9,7 @@ class LayoutIssue(BaseModel):
     bbox: List[float]
     evidence: Optional[str] = None
     message: Optional[str] = None
+    location: Optional[dict] = None  # {"section": "4.2", "line_start": 45}
     anchor_id: Optional[str] = None
     highlight: Optional[List[float]] = None
 

@@ -1,5 +1,7 @@
 import sys
 import os
+import base64
+import pytest
 
 # Add parent directory to sys.path to allow importing modules from the root
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -8,7 +10,10 @@ from fastapi.testclient import TestClient
 from main import app
 from config import AGENT_NAME, AGENT_VERSION
 
-client = TestClient(app)
+client = TestClient(app=app)
+
+# Minimal valid PDF (1 page, "hello world")
+MINIMAL_PDF_B64 = "JVBERi0xLjQKJcfsj6IKMSAwIG9iago8PC9UeXBlL0NhdGFsb2cvUGFnZXMgMiAwIFI+PgplbmRvYmoKMiAwIG9iago8PC9UeXBlL1BhZ2VzL0NvdW50IDEvS2lkc1szIDAgUl0+PgplbmRvYmoKMyAwIG9iago8PC9UeXBlL1BhZ2UvTWVkaWFCb3hbMCAwIDU5NSA4NDJdL1Jlc291cmNlczw8L0ZvbnQ8PC9GMSA0IDAgUj4+Pj4vQ29udGVudHMgNSAwIFIvUGFyZW50IDIgMCBSPj4KZW5kb2JqCjQgMCBvYmoKPDwvVHlwZS9Gb250L1N1YnR5cGUvVHlwZTEvQmFzZUZvbnQvSGVsdmV0aWNhPj4KZW5kb2JqCjUgMCBvYmoKPDwvTGVuZ3RoIDQ0Pj5zdHJlYW0KQlQKL0YxIDI0IFRmCjEwMCA3MDAgVGQKKGhlbGxvIHdvcmxkKSBUagpFVAplbmRzdHJlYW0KZW5kb2JqCnhyZWYKMCA2CjAwMDAwMDAwMDAgNjU1MzUgZgowMDAwMDAwMDEwIDAwMDAwIG4KMDAwMDAwMDA2MCAwMDAwMCBuCjAwMDAwMDAxMTcgMDAwMDAgbgowMDAwMDAwMjQ1IDAwMDAwIG4KMDAwMDAwMDMzMyAwMDAwMCBuCnRyYWlsZXIKPDwvU2l6ZSA2L0RvYyAxIDAgUj4+CnN0YXJ0eHJlZgo0MjcKJSVFT0YK"
 
 def test_health_check():
     response = client.get("/health")
@@ -24,7 +29,7 @@ def test_audit_valid_request():
             "chunk_id": "chunk_1"
         },
         "payload": {
-            "content": "这是一段测试论文内容。"
+            "content": MINIMAL_PDF_B64
         },
         "config": {
             "temperature": 0.1,
@@ -50,6 +55,8 @@ def test_audit_valid_request():
     assert isinstance(data["result"]["score"], int)
     assert data["result"]["audit_level"] in ["Info", "Warning", "Critical"]
     assert isinstance(data["result"]["tags"], list)
+    assert "issues" in data["result"]
+    assert isinstance(data["result"]["issues"], list)
 
 def test_audit_invalid_request():
     # 缺少必需字段 (request_id)
@@ -70,3 +77,14 @@ def test_audit_invalid_request():
     # 验证参数错误返回400 (由main.py中自定义的exception_handler处理)
     # 注意：FastAPI默认validation error是422，但我们在main.py中改为了400
     assert response.status_code == 400
+
+def test_get_rules():
+    """Test the /rules endpoint."""
+    response = client.get("/rules")
+    assert response.status_code == 200
+    rules = response.json()
+    assert isinstance(rules, dict)
+    # Check for known keys from rules.yaml
+    assert "heading_check" in rules
+    assert "figure_table_check" in rules
+    assert "formula_check" in rules

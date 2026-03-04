@@ -1,3 +1,15 @@
+import yaml
+import os
+from typing import Dict, Any
+
+RULES_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "rules.yaml")
+
+def load_rules() -> Dict[str, Any]:
+    if not os.path.exists(RULES_PATH):
+        return {}
+    with open(RULES_PATH, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
 from typing import List, Any
 import re
 from .layout_schema import LayoutIssue
@@ -23,6 +35,7 @@ def check_citation_reference_match(citations: List[Any], references: List[Any]) 
                     bbox=c.bbox,
                     evidence=c.content,
                     message="引用标注在参考文献区未找到对应条目",
+                    location={"section": "unknown", "line_start": 0} # Placeholder
                 )
             )
     return issues

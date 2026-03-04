@@ -5,7 +5,6 @@ import math
 import re
 from config import LLM_TIMEOUT_SEC
 from .llm_client import LLMClient
-from .rule_engine import RuleEngine
 
 
 def _element_get(element: Any, key: str) -> Any:
@@ -89,6 +88,8 @@ def _parse_author_year(citation: str) -> Optional[Dict[str, str]]:
         return None
     return {"author": author_match.group(1).lower(), "year": year_match.group(0)}
 
+import difflib
+
 class TypoChecker:
     """
     语义判定 - 错别字红线判定
@@ -105,10 +106,53 @@ class TypoChecker:
         2. 上下文语义纠错 (排除专业名词歧义)
         3. 红线触发逻辑: 全文>10个 -> Warning; 关键术语错字 -> Critical
         """
-        # 模拟检测逻辑
-        # if typo_count > self.max_typos_total:
-        #     issues.append({...})
-        pass
+        if not content:
+            return
+
+        typo_count = 0
+        found_typos = []
+
+        # 1. Critical Keywords Check (Fuzzy Matching)
+        # 简单分词 (按空格和标点)
+        words = re.findall(r"\b\w+\b", content)
+        # 对每个关键术语，寻找文本中相似但不完全相同的词
+        for keyword in self.critical_keywords:
+            # 忽略大小写比较，如果 text 中有 deep learning 而 keyword 是 Deep Learning
+            # 这其实由 TerminologyChecker 处理。
+            # TypoChecker 处理的是拼写错误，如 "TensorFlow" 写成 "TensorFlwo"
+            
+            # 这里使用 difflib 查找相似词
+            # 为了性能，只对长度相近的词进行比较
+            candidates = [w for w in words if abs(len(w) - len(keyword)) <= 2]
+            matches = difflib.get_close_matches(keyword, candidates, n=3, cutoff=0.80)
+            
+            for match in matches:
+                if match != keyword:
+                    # 排除掉仅仅是大小写不同的情况 (交给 TerminologyChecker)
+                    if match.lower() == keyword.lower():
+                        continue
+                        
+                    issues.append({
+                        "issue_type": "Critical_Typo",
+                        "severity": "Critical",
+                        "evidence": match,
+                        "message": f"关键术语拼写错误: '{match}' 应为 '{keyword}'"
+                    })
+                    typo_count += 1
+                    found_typos.append(match)
+
+        # 2. 通用错别字检测 (模拟/占位)
+        # 在没有 NLP 库的情况下，暂时只统计上述发现的 Critical Typos
+        # 如果未来集成了 pycorrector，这里可以扩展
+        
+        # 3. 阈值检查
+        if typo_count > self.max_typos_total:
+            issues.append({
+                "issue_type": "Typo_Limit_Exceeded",
+                "severity": "Warning",
+                "evidence": f"Found {typo_count} typos (including: {', '.join(found_typos[:3])}...)",
+                "message": f"全文错别字数量超过红线 ({self.max_typos_total}个)"
+            })
 
 class TerminologyChecker:
     """
@@ -166,13 +210,57 @@ class PunctuationChecker:
     def __init__(self, config: Dict[str, Any]):
         self.config = config
         self.allow_mixed = config.get("allow_mixed_punctuation", False)
+        self.check_position = config.get("check_citation_position", True)
 
     def check(self, content: str, layout_data: Dict[str, Any], issues: List[Dict]):
         """
         1. 杜绝中英文标点混用
         2. 标点位置错误 (如引用标注在标点外)
         """
-        pass
+        if not content:
+            return
+
+        # 1. Mixed Punctuation Check
+        if not self.allow_mixed:
+            # Chinese char followed by English punctuation
+            # Punctuation: , . ? ! ; : ( )
+            cn_en_punct_pattern = re.compile(r"[\u4e00-\u9fff]\s*[,\.\?!;:\(\)]")
+            # English word followed by Chinese punctuation
+            en_cn_punct_pattern = re.compile(r"[a-zA-Z0-9]\s*[，。？！；：\（\）]")
+
+            for m in cn_en_punct_pattern.finditer(content):
+                issues.append({
+                    "issue_type": "Punctuation_Mixed",
+                    "severity": "Warning",
+                    "evidence": m.group(),
+                    "message": "中文文本使用了英文标点",
+                    "location": {"index": m.start()}
+                })
+            
+            for m in en_cn_punct_pattern.finditer(content):
+                issues.append({
+                    "issue_type": "Punctuation_Mixed",
+                    "severity": "Warning",
+                    "evidence": m.group(),
+                    "message": "英文文本使用了中文标点",
+                    "location": {"index": m.start()}
+                })
+
+        # 2. Citation Position Check
+        if self.check_position:
+            # Check for Citation AFTER Punctuation (Error: .[1])
+            # Correct: [1]. or [1],
+            # Pattern: Punctuation followed by Citation
+            punct_cite_pattern = re.compile(r"[，。,\.]\s*(\[\d+\])")
+            
+            for m in punct_cite_pattern.finditer(content):
+                issues.append({
+                    "issue_type": "Citation_Position_Error",
+                    "severity": "Warning",
+                    "evidence": m.group(),
+                    "message": "引用标注位置错误 (应置于标点符号之前)",
+                    "location": {"index": m.start()}
+                })
 
 class CitationChecker:
     """
@@ -283,13 +371,32 @@ class SemanticChecker:
     """
     def __init__(self):
         self.llm_client = LLMClient()
-        self.rule_engine = RuleEngine() # 动态规则引擎
+        self.rules = {}
         
-        # 初始化子模块并注入规则
-        self.typo_checker = TypoChecker(self.rule_engine.get_rule("typo_check"))
-        self.term_checker = TerminologyChecker(self.rule_engine.get_rule("terminology_check"))
-        self.punct_checker = PunctuationChecker(self.rule_engine.get_rule("punctuation_check"))
-        self.cite_checker = CitationChecker(self.rule_engine.get_rule("citation_check"))
+        # Initialize sub-checkers with empty rules initially
+        self.typo_checker = TypoChecker({})
+        self.term_checker = TerminologyChecker({})
+        self.punct_checker = PunctuationChecker({})
+        self.cite_checker = CitationChecker({})
+
+    def update_rules(self, rules: Dict[str, Any]):
+        """
+        Update rules for all sub-checkers
+        """
+        self.rules = rules
+        # Update sub-checkers with specific rule sections
+        # Assuming rules structure matches sub-checker expectations
+        self.typo_checker.config = rules.get("typo_check", {})
+        self.term_checker.config = rules.get("terminology_check", {})
+        self.punct_checker.config = rules.get("punctuation_check", {})
+        self.cite_checker.config = rules.get("citation_check", {})
+        
+        # Re-initialize or update internal config dependent logic if needed
+        # For example, TypoChecker reads max_typos_total in __init__
+        self.typo_checker = TypoChecker(self.typo_checker.config)
+        self.term_checker = TerminologyChecker(self.term_checker.config)
+        self.punct_checker = PunctuationChecker(self.punct_checker.config)
+        self.cite_checker = CitationChecker(self.cite_checker.config)
 
     async def check(self, content: str, layout_data: Dict[str, Any]) -> Dict[str, Any]:
         """

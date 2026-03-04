@@ -1,11 +1,18 @@
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, declarative_base
-from sqlalchemy import Column, String, Integer, Text, TIMESTAMP, BigInteger, Enum as SAEnum
+from sqlalchemy import Column, String, Integer, Text, TIMESTAMP, BigInteger, Enum as SAEnum, Float, ARRAY
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from typing import AsyncGenerator
 import enum
 from datetime import datetime
 from config import DATABASE_URL
+import uuid
+
+# Try to import Vector from pgvector.sqlalchemy, fallback if not installed
+try:
+    from pgvector.sqlalchemy import Vector
+except ImportError:
+    Vector = None
 
 Base = declarative_base()
 
@@ -15,6 +22,42 @@ class TaskStatus(str, enum.Enum):
     SUCCESS = "SUCCESS"
     FAILED = "FAILED"
     TIMEOUT = "TIMEOUT"
+
+class PaperSection(Base):
+    """
+    论文切片存储表 (paper_sections)
+    用于存储解析后的论文内容
+    """
+    __tablename__ = "paper_sections"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    paper_id = Column(UUID(as_uuid=True), index=True, nullable=False, comment="论文ID")
+    chunk_id = Column(String, index=True, nullable=False, comment="切片ID")
+    section_name = Column(String, comment="章节名称")
+    content = Column(Text, nullable=False, comment="切片内容")
+    metadata_json = Column(JSONB, default={}, comment="元数据")
+    
+    created_at = Column(TIMESTAMP, default=datetime.utcnow)
+
+class ExpertComment(Base):
+    """
+    专家评语知识库 (expert_comments)
+    用于存储量化规则和向量数据
+    """
+    __tablename__ = "expert_comments"
+    
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    rule_id = Column(String, index=True, comment="规则ID")
+    category = Column(String, index=True, comment="分类: formatting/statistics/etc")
+    rule_content = Column(Text, nullable=False, comment="规则文本")
+    
+    # Use Vector if available, otherwise fallback to ARRAY(Float) or JSONB
+    if Vector:
+        vector = Column(Vector(1536), comment="规则向量")
+    else:
+        vector = Column(ARRAY(Float), comment="规则向量 (Fallback)")
+        
+    created_at = Column(TIMESTAMP, default=datetime.utcnow)
 
 class ReviewTask(Base):
     """

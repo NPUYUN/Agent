@@ -5,7 +5,7 @@ import statistics
 from .pdf_utils import open_pdf, extract_blocks, is_encrypted, is_scanned_page, split_columns
 from .layout_zones import is_reference_title, classify_line_region, is_caption
 from .layout_exceptions import ParseError, ParseReport
-from .layout_rules import check_citation_reference_match
+from .layout_rules import check_citation_reference_match, load_rules
 from .layout_adapter import with_anchor
 
 
@@ -211,7 +211,10 @@ class PDFParser:
 
 class VisualValidator:
     def __init__(self):
-        pass
+        self.rules = {}
+
+    def update_rules(self, rules: Dict[str, Any]):
+        self.rules = rules
 
     async def validate(self, elements: List[VisualElement]) -> Dict[str, Any]:
         issues = []
@@ -223,6 +226,10 @@ class VisualValidator:
 
     def _check_charts(self, elements: List[VisualElement]) -> List[Dict[str, Any]]:
         issues = []
+        rule_config = self.rules.get("figure_table_check", {})
+        fig_caption_pos = rule_config.get("caption_requirement", "bottom")
+        table_caption_pos = rule_config.get("table_caption_requirement", "top")
+
         captions = [e for e in elements if e.type == "title" and is_caption(e.content)]
         images = [e for e in elements if e.type == "image"]
         text_refs = [e for e in elements if e.type == "text"]
@@ -242,6 +249,7 @@ class VisualValidator:
                             "bbox": t.bbox,
                             "evidence": t.content,
                             "message": "正文引用的图表编号未在图表标题中找到",
+                            "location": {"page": t.page_num, "bbox": t.bbox}
                         }
                     )
         for c in captions:
@@ -255,6 +263,7 @@ class VisualValidator:
                         "bbox": c.bbox,
                         "evidence": c.content,
                         "message": "图表标题未匹配到图像区域",
+                        "location": {"page": c.page_num, "bbox": c.bbox}
                     }
                 )
                 continue
@@ -262,32 +271,59 @@ class VisualValidator:
                 same_page_images,
                 key=lambda i: abs(i.bbox[1] - c.bbox[1]),
             )
-            if c.content.startswith("图") and c.bbox[1] < nearest.bbox[1]:
-                issues.append(
-                    {
+            
+            # Dynamic Rule Check: Figure Caption
+            if c.content.startswith("图"):
+                if fig_caption_pos == "bottom" and c.bbox[1] < nearest.bbox[1]:
+                     issues.append({
                         "issue_type": "Label_Missing",
                         "severity": "Warning",
                         "page_num": c.page_num,
                         "bbox": c.bbox,
                         "evidence": c.content,
-                        "message": "图标题应位于图下方",
-                    }
-                )
-            if c.content.startswith("表") and c.bbox[1] > nearest.bbox[1]:
-                issues.append(
-                    {
+                        "message": f"图标题应位于图下方 (规则要求: {fig_caption_pos})",
+                        "location": {"page": c.page_num, "bbox": c.bbox}
+                    })
+                elif fig_caption_pos == "top" and c.bbox[1] > nearest.bbox[1]:
+                     issues.append({
                         "issue_type": "Label_Missing",
                         "severity": "Warning",
                         "page_num": c.page_num,
                         "bbox": c.bbox,
                         "evidence": c.content,
-                        "message": "表标题应位于表上方",
-                    }
-                )
+                        "message": f"图标题应位于图上方 (规则要求: {fig_caption_pos})",
+                        "location": {"page": c.page_num, "bbox": c.bbox}
+                    })
+
+            # Dynamic Rule Check: Table Caption
+            if c.content.startswith("表"):
+                if table_caption_pos == "top" and c.bbox[1] > nearest.bbox[1]:
+                    issues.append({
+                        "issue_type": "Label_Missing",
+                        "severity": "Warning",
+                        "page_num": c.page_num,
+                        "bbox": c.bbox,
+                        "evidence": c.content,
+                        "message": f"表标题应位于表上方 (规则要求: {table_caption_pos})",
+                        "location": {"page": c.page_num, "bbox": c.bbox}
+                    })
+                elif table_caption_pos == "bottom" and c.bbox[1] < nearest.bbox[1]:
+                    issues.append({
+                        "issue_type": "Label_Missing",
+                        "severity": "Warning",
+                        "page_num": c.page_num,
+                        "bbox": c.bbox,
+                        "evidence": c.content,
+                        "message": f"表标题应位于表下方 (规则要求: {table_caption_pos})",
+                        "location": {"page": c.page_num, "bbox": c.bbox}
+                    })
         return issues
 
     def _check_formulas(self, elements: List[VisualElement]) -> List[Dict[str, Any]]:
         issues = []
+        rule_config = self.rules.get("formula_check", {})
+        numbering_pos = rule_config.get("numbering", "right")
+
         formulas = [e for e in elements if e.type == "formula"]
         if not formulas:
             return issues
@@ -310,6 +346,7 @@ class VisualValidator:
                         "bbox": f.bbox,
                         "evidence": f.content,
                         "message": "公式未检测到编号",
+                        "location": {"page": f.page_num, "bbox": f.bbox}
                     }
                 )
                 continue
@@ -323,24 +360,46 @@ class VisualValidator:
                         "bbox": f.bbox,
                         "evidence": f.content,
                         "message": "公式编号未在正文引用中出现",
+                        "location": {"page": f.page_num, "bbox": f.bbox}
                     }
                 )
             max_x = page_max_x.get(f.page_num, f.bbox[2])
-            if f.bbox[2] < max_x * 0.85:
-                issues.append(
-                    {
-                        "issue_type": "Formula_Misaligned",
-                        "severity": "Warning",
-                        "page_num": f.page_num,
-                        "bbox": f.bbox,
-                        "evidence": f.content,
-                        "message": "公式编号疑似未右对齐",
-                    }
-                )
+            
+            # Dynamic Rule Check: Formula Numbering
+            if numbering_pos == "right":
+                if f.bbox[2] < max_x * 0.85:
+                    issues.append(
+                        {
+                            "issue_type": "Formula_Misaligned",
+                            "severity": "Warning",
+                            "page_num": f.page_num,
+                            "bbox": f.bbox,
+                            "evidence": f.content,
+                            "message": "公式编号疑似未右对齐",
+                            "location": {"page": f.page_num, "bbox": f.bbox}
+                        }
+                    )
+            elif numbering_pos == "left":
+                # Assuming left margin is near 0
+                 if f.bbox[0] > max_x * 0.15: # Simple heuristic
+                    issues.append(
+                        {
+                            "issue_type": "Formula_Misaligned",
+                            "severity": "Warning",
+                            "page_num": f.page_num,
+                            "bbox": f.bbox,
+                            "evidence": f.content,
+                            "message": "公式编号疑似未左对齐",
+                            "location": {"page": f.page_num, "bbox": f.bbox}
+                        }
+                    )
         return issues
 
     def _check_titles(self, elements: List[VisualElement]) -> List[Dict[str, Any]]:
         issues = []
+        rule_config = self.rules.get("heading_check", {})
+        max_depth = rule_config.get("max_depth", 4)
+
         titles = [e for e in elements if e.type == "title" and e.region == "title"]
         numbered = []
         for t in titles:
@@ -348,6 +407,21 @@ class VisualValidator:
             if not m:
                 continue
             parts = [int(x) for x in m.group(1).split(".")]
+            
+            # Dynamic Rule Check: Max Depth
+            if len(parts) > max_depth:
+                 issues.append(
+                    {
+                        "issue_type": "Hierarchy_Fault",
+                        "severity": "Warning",
+                        "page_num": t.page_num,
+                        "bbox": t.bbox,
+                        "evidence": t.content,
+                        "message": f"标题层级过深 (最大允许: {max_depth})",
+                        "location": {"page": t.page_num, "bbox": t.bbox}
+                    }
+                )
+
             numbered.append((t, parts))
         for i in range(1, len(numbered)):
             prev, prev_parts = numbered[i - 1]
@@ -361,6 +435,7 @@ class VisualValidator:
                         "bbox": curr.bbox,
                         "evidence": curr.content,
                         "message": "标题层级跳跃",
+                        "location": {"page": curr.page_num, "bbox": curr.bbox}
                     }
                 )
                 continue
@@ -374,6 +449,7 @@ class VisualValidator:
                             "bbox": curr.bbox,
                             "evidence": curr.content,
                             "message": "标题序号不连续",
+                            "location": {"page": curr.page_num, "bbox": curr.bbox}
                         }
                     )
         return issues
@@ -389,6 +465,9 @@ class LayoutAnalyzer:
     def __init__(self):
         self.parser = PDFParser()
         self.validator = VisualValidator()
+
+    def update_rules(self, rules: Dict[str, Any]):
+        self.validator.update_rules(rules)
 
     async def analyze(self, content: Any) -> Dict[str, Any]:
         parse_result = await self.parser.parse(content)

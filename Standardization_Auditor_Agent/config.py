@@ -22,6 +22,9 @@ QWEN_MODEL_NAME = os.getenv("QWEN_MODEL_NAME", "qwen-plus")
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "none")
 LLM_TIMEOUT_SEC = int(os.getenv("LLM_TIMEOUT_SEC", "8"))
 
+# 布局分析配置
+LAYOUT_ANALYSIS_TIMEOUT = int(os.getenv("LAYOUT_ANALYSIS_TIMEOUT", "300")) # 5分钟，适应长文档处理
+
 # 数据库配置
 # Remote (Default)
 # DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+asyncpg://user:password@localhost/dbname")

@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field, field_validator, UUID4
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from enum import Enum
 from config import ALLOWED_TAGS, AGENT_NAME, AGENT_VERSION
 
@@ -14,7 +14,7 @@ class RequestMetadata(BaseModel):
     chunk_id: str = Field(..., description="切片ID", min_length=1)
 
 class RequestPayload(BaseModel):
-    content: str = Field(..., description="论文切片内容", min_length=1)
+    content: Optional[str] = Field(None, description="论文切片内容 (如果为空，则根据paper_id从数据库拉取)")
     context_before: Optional[str] = Field(None, description="前一段落摘要")
     context_after: Optional[str] = Field(None, description="后一段落开头")
 
@@ -57,12 +57,27 @@ class AgentInfo(BaseModel):
     name: str = Field(AGENT_NAME, description="Agent名称")
     version: str = Field(AGENT_VERSION, description="Agent版本")
 
+class IssueDetail(BaseModel):
+    """
+    Detailed issue report, matching the frontend requirement for anchor and highlighting.
+    """
+    issue_type: str = Field(..., description="问题类型")
+    severity: str = Field(..., description="严重程度")
+    page_num: int = Field(..., description="页码")
+    bbox: List[float] = Field(..., description="边界框 [x0, y0, x1, y1]")
+    evidence: Optional[str] = Field(None, description="原文证据/特征字符")
+    message: Optional[str] = Field(None, description="错误描述")
+    location: Optional[Dict[str, Any]] = Field(None, description="详细定位信息 (page, bbox)")
+    anchor_id: Optional[str] = Field(None, description="锚点ID")
+    highlight: Optional[List[float]] = Field(None, description="高亮区域")
+
 class AuditResult(BaseModel):
     score: int = Field(..., ge=0, le=100, description="评分")
     audit_level: AuditLevel = Field(..., description="风险等级")
     comment: str = Field(..., description="审计评语")
     suggestion: str = Field(..., description="修改建议")
     tags: List[str] = Field(..., description="问题标签")
+    issues: List[IssueDetail] = Field(default=[], description="详细问题列表")
 
     @field_validator('tags')
     def validate_tags(cls, v):

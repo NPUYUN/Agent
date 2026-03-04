@@ -26,12 +26,17 @@ Standardization_Auditor_Agent/
 ├── utils/                      # 通用工具库
 │   └── logger.py               # 标准化日志模块
 ├── tests/                      # 测试用例
-│   └── test_api.py             # API 接口测试
+│   ├── test_api.py             # API 接口测试
+│   └── test_layout_rules.py    # 布局规则单元测试
+├── scripts/                    # 运维脚本
+│   ├── verify_deployment.py    # 部署验证脚本 (端到端)
+│   └── seed_rules.py           # 规则库入库脚本
 ├── config.py                   # 全局配置 (Prompt, Version, Tags)
 ├── rules.yaml                  # 语义校验规则配置文件 (动态可调)
 ├── models.py                   # Pydantic 数据模型 (严格遵循 API 协议)
 ├── main.py                     # FastAPI 应用入口 (含生命周期与DB写入)
 ├── requirements.txt            # 项目依赖 (精准版本)
+├── 测试说明.md                  # 测试操作指南 (新增)
 └── Dockerfile                  # 容器化构建文件
 ```
 
@@ -55,9 +60,10 @@ Standardization_Auditor_Agent/
 - **LLM Integration**: 集成 `Gemini` / `Qwen` (Compatible Mode) 辅助长文档扫描。
 
 ### 3. 数据测试/标注 (Data Support) - 1人
-- **样本库搭建**: 收集≥200份样本（规范/单一问题/混合问题），覆盖所有审计维度。
-- **标注规范**: 制定标准化格式问题标注手册，确保 CV 和 语义 模块的测试基准。
-- **一致性核查**: 对接 Orchestrator，核查审计结果 JSON 的完整性与准确性，确保无漏检/误检。
+- **样本库搭建**: 收集≥200份样本（规范/单一问题/混合问题），覆盖图表/公式/标题/错别字/术语/标点/引用等维度，并按问题类型分类管理。
+- **标注规范与数据集**: 制定标准化格式问题标注手册，约定“问题类型/页码/坐标/证据文本/风险等级/修正建议”的记录方式，并将标注结果沉淀为可直接加载的测试数据集（Excel + JSON）。
+- **测试用例与回归**: 设计并维护针对 CV/布局与语义判定模块的单元测试、集成测试、场景化测试用例，优先通过 `tests/` 目录下的 `pytest` 用例（如 `tests/test_api.py`）与端到端脚本（`audit_client.py`）完成回归测试，确保不同版本之间结果可比对、可追溯。
+- **一致性核查**: 对接 Orchestrator 与前端，核查审计结果 JSON 的完整性（是否符合开发规范中的 API 协议）与数据库写入字段的完整性，确保 JSON 结构、数据库字段、前端展示三者一致；同时检查锚点定位与导师复核流程是否正常。
 
 ## 核心交互流程
 
@@ -67,6 +73,8 @@ Standardization_Auditor_Agent/
 4.  **结果融合**: 合并 CV 与 Semantic 问题的列表，去重。
 5.  **数据持久化**: 异步写入 `review_tasks` 数据库表 (PostgreSQL)。
 6.  **响应返回**: 返回符合 API 协议的 JSON 结果。
+
+> 数据测试/标注 岗需基于上述流程，持续维护与扩展配套测试数据与测试用例，保证每次修改都能快速通过自动化测试完成验证。
 
 ## 快速开始
 
@@ -102,14 +110,44 @@ $env:QWEN_MODEL_NAME="qwen-plus"
 # Gemini 配置 (备用)
 $env:GOOGLE_API_KEY="your_google_api_key"
 $env:GEMINI_MODEL_NAME="gemini-1.5-flash"
+
+# 布局分析超时时间 (秒)
+$env:LAYOUT_ANALYSIS_TIMEOUT="300"
 ```
 
-### 4. 运行 Agent
+### 4. 初始化数据库
+
+```bash
+python ensure_db.py
+```
+
+### 5. 运行 Agent
 
 ```bash
 python main.py
 ```
 服务默认运行在 `http://0.0.0.0:8000`。
+
+### 6. 运行测试与示例
+
+详细测试步骤请参考 [测试说明文档](测试说明.md)。
+
+- **单元/接口测试 (pytest)**  
+  在 `Standardization_Auditor_Agent` 目录下运行：
+  ```bash
+  pytest
+  ```
+  当前主要覆盖：
+  - `/health` 接口可用性与返回结构；
+  - `/audit` 的合法请求与非法请求（缺少字段）行为，验证参数校验与 400 状态码返回。
+
+- **端到端示例（PDF → 审计结果）**  
+  在 `Standardization_Auditor_Agent` 目录下运行：
+  ```bash
+  python audit_client.py
+  ```
+  - 若未指定文件，将自动生成一份包含典型格式问题的示例 PDF (`sample_audit.pdf`)，并调用已启动的 Agent 服务；
+  - 终端会打印评分 (`score`)、风险等级 (`audit_level`)、问题标签 (`tags`) 以及完整 JSON 响应，便于人工核对与后续标注。
 
 ## API 接口
 

@@ -11,7 +11,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy import inspect
 from config import DATABASE_URL
-from core.database import Base
+from core.database import Base, Vector
 
 # Parse connection details from config URL
 # Format: postgresql+asyncpg://user:password@host:port/dbname
@@ -51,6 +51,24 @@ async def ensure_database_exists():
             print(f"✅ Database '{DB_NAME}' created successfully.")
         else:
             print(f"✅ Database '{DB_NAME}' already exists.")
+
+        # Reconnect to the new database to install extensions
+        if Vector:
+            print(f"Installing extensions in '{DB_NAME}' (Vector support enabled)...")
+            db_conn = await asyncpg.connect(
+                user=DB_USER,
+                password=DB_PASS,
+                database=DB_NAME,
+                host=DB_HOST,
+                port=DB_PORT
+            )
+            try:
+                await db_conn.execute('CREATE EXTENSION IF NOT EXISTS vector;')
+                print("✅ Extension 'vector' installed/verified.")
+            finally:
+                await db_conn.close()
+        else:
+            print("ℹ️ Vector support not available (pgvector not installed). Skipping extension installation.")
             
     except Exception as e:
         print(f"❌ Error checking/creating database: {e}")
