@@ -1,4 +1,4 @@
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 import asyncio
 import base64
 import math
@@ -12,6 +12,44 @@ def _element_get(element: Any, key: str) -> Any:
     if isinstance(element, dict):
         return element.get(key)
     return getattr(element, key, None)
+
+
+def _is_likely_reference(element: Any) -> bool:
+    """
+    Check if an element is likely a reference item, either by region tag or heuristic content analysis.
+    """
+    region = _element_get(element, "region")
+    if region == "reference":
+        return True
+    
+    content = str(_element_get(element, "content") or "")
+    if not content:
+        return False
+        
+    # Heuristic: Starts with [N] or N. and contains reference keywords
+    # Exclude typical section headers like "1. Introduction" (usually short, no vol/pp)
+    
+    # Special case: Isolated reference markers (e.g. "[14]") often found when layout analysis splits marker from text
+    if re.match(r"^\s*\[\d+\]\s*$", content):
+        return True
+
+    if re.match(r"^\s*(\[\d+\]|\d+\.)", content):
+        if len(content) > 20:
+            # Common reference keywords (English & Chinese)
+            # vol, pp, no, doi, http, isbn, issn, journal, conference, proceedings, trans, rev, arxiv
+            # 卷, 期, 页, 学报, 会议, 论文集, 出版社
+            # Standard GB/T 7714 type indicators: [J], [C], [D], [M], [EB/OL], etc.
+            # Common abbreviations: et al., eds.
+            pattern = r"(vol\.|pp\.|no\.|doi|http|isbn|issn|journal|conference|proceedings|trans\.|rev\.|arxiv|学报|会议|论文集|出版社|pages|et al\.?|eds\.?|\[[A-Z]{1,2}(/[A-Z]+)?\])"
+            if re.search(pattern, content, re.IGNORECASE):
+                return True
+            
+            # Fallback: If no keywords, but looks like a standard reference (starts with [N] + space, long enough)
+            # This catches references with just authors/titles and no "vol/pp" in the first block.
+            # Require space after number to avoid [14]、 (enumeration without space)
+            if len(content) > 40 and re.match(r"^\s*(\[\d+\]|\d+\.)\s", content):
+                return True
+    return False
 
 
 def _extract_text_from_layout(layout_data: Dict[str, Any]) -> str:
@@ -58,14 +96,18 @@ def _normalize_term_key(term: str) -> str:
 
 def _extract_reference_numbers(reference_texts: List[str]) -> List[str]:
     nums = []
-    for line in reference_texts:
-        m = re.match(r"^\s*\[(\d+)\]", line)
-        if m:
-            nums.append(m.group(1))
-            continue
-        m = re.match(r"^\s*(\d+)[.)]", line)
-        if m:
-            nums.append(m.group(1))
+    for text in reference_texts:
+        # Handle multi-line elements (references might be merged in one block)
+        for line in text.split('\n'):
+            if not line.strip():
+                continue
+            m = re.match(r"^\s*\[(\d+)\]", line)
+            if m:
+                nums.append(m.group(1))
+                continue
+            m = re.match(r"^\s*(\d+)[.)]", line)
+            if m:
+                nums.append(m.group(1))
     return nums
 
 
@@ -125,16 +167,21 @@ class TypoChecker:
             # 这里使用 difflib 查找相似词
             # 为了性能，只对长度相近的词进行比较
             candidates = [w for w in words if abs(len(w) - len(keyword)) <= 2]
-            matches = difflib.get_close_matches(keyword, candidates, n=3, cutoff=0.80)
+            # 提高匹配阈值，避免将 "神经网络" 误判为 "卷积神经网络" 的错别字
+            matches = difflib.get_close_matches(keyword, candidates, n=3, cutoff=0.85)
             
             for match in matches:
                 if match != keyword:
                     # 排除掉仅仅是大小写不同的情况 (交给 TerminologyChecker)
                     if match.lower() == keyword.lower():
                         continue
+                    
+                    # 排除常见复数形式 (简单的 heuristic)
+                    if match == keyword + "s" or match == keyword + "es":
+                        continue
                         
                     issues.append({
-                        "issue_type": "Critical_Typo",
+                        "issue_type": "Critical_Keyword_Typo",
                         "severity": "Critical",
                         "evidence": match,
                         "message": f"关键术语拼写错误: '{match}' 应为 '{keyword}'"
@@ -173,21 +220,44 @@ class TerminologyChecker:
         """
         if not content:
             return
+        
+        # Check canonical terms consistency
         for canonical, variants in self.terms.items():
-            forms = [canonical] + list(variants or [])
-            found = []
-            for form in forms:
-                if _term_found(content, form):
-                    found.append(form)
-            if len({_normalize_term_key(f) for f in found}) > 1:
+            allowed_forms = {canonical}
+            if variants:
+                allowed_forms.update(variants)
+            
+            # Escape regex characters in the term
+            # Use \b boundaries for English words
+            if re.search(r"[A-Za-z]", canonical):
+                escaped_term = re.escape(canonical)
+                # Replace escaped spaces with \s+ to match varying whitespace
+                pattern = r"\b" + escaped_term.replace(r"\ ", r"\s+") + r"\b"
+            else:
+                pattern = re.escape(canonical)
+                
+            # Find ALL occurrences (case-insensitive)
+            # Note: This simple regex approach works best for English terms.
+            # For strict matching, we might need more complex logic.
+            matches = re.findall(pattern, content, flags=re.IGNORECASE)
+            
+            # Check if any found match is NOT in the allowed set
+            inconsistent_usages = set()
+            for usage in matches:
+                if usage not in allowed_forms:
+                    inconsistent_usages.add(usage)
+            
+            if inconsistent_usages:
                 issues.append(
                     {
                         "issue_type": "Terminology_Inconsistent",
                         "severity": "Warning",
-                        "evidence": ", ".join(found),
+                        "evidence": ", ".join(inconsistent_usages),
                         "message": f"术语写法不一致，建议统一为：{canonical}",
                     }
                 )
+
+        # Check forbidden variants
         for canonical, forbidden in self.forbidden_variants.items():
             found_forbidden = []
             for form in forbidden or []:
@@ -221,49 +291,72 @@ class PunctuationChecker:
         if not content:
             return
 
+        # Prepare text segments to check (excluding 'reference' region)
+        segments_to_check = []
+        
+        # If we have layout data with elements, use it to filter
+        elements = layout_data.get("elements", []) if isinstance(layout_data, dict) else []
+        if elements:
+            for e in elements:
+                # Skip reference region (including heuristic detection)
+                if _is_likely_reference(e):
+                    continue
+                text_val = _element_get(e, "content")
+                if text_val:
+                    segments_to_check.append(str(text_val))
+        else:
+            # Fallback to full content if no elements
+            segments_to_check.append(content)
+
         # 1. Mixed Punctuation Check
         if not self.allow_mixed:
-            # Chinese char followed by English punctuation
-            # Punctuation: , . ? ! ; : ( )
-            cn_en_punct_pattern = re.compile(r"[\u4e00-\u9fff]\s*[,\.\?!;:\(\)]")
-            # English word followed by Chinese punctuation
-            en_cn_punct_pattern = re.compile(r"[a-zA-Z0-9]\s*[，。？！；：\（\）]")
-
-            for m in cn_en_punct_pattern.finditer(content):
-                issues.append({
-                    "issue_type": "Punctuation_Mixed",
-                    "severity": "Warning",
-                    "evidence": m.group(),
-                    "message": "中文文本使用了英文标点",
-                    "location": {"index": m.start()}
-                })
+            # 1a. General punctuation (excluding .)
+            cn_en_punct_pattern = re.compile(r"[\u4e00-\u9fff]\s*[,?!;:\(\)]")
+            # 1b. Check for '.' specifically, avoiding TOC leaders
+            cn_en_dot_pattern = re.compile(r"[\u4e00-\u9fff]\s*\.(?!\s*[\.\d])")
+            # 1c. English text using Chinese punctuation
+            en_cn_punct_pattern = re.compile(r"[a-zA-Z]\s*[，。？！；：]")
             
-            for m in en_cn_punct_pattern.finditer(content):
-                issues.append({
-                    "issue_type": "Punctuation_Mixed",
-                    "severity": "Warning",
-                    "evidence": m.group(),
-                    "message": "英文文本使用了中文标点",
-                    "location": {"index": m.start()}
-                })
+            for segment in segments_to_check:
+                for m in cn_en_punct_pattern.finditer(segment):
+                    issues.append({
+                        "issue_type": "Punctuation_Mixed",
+                        "severity": "Warning",
+                        "evidence": m.group(),
+                        "message": "中文文本使用了英文标点",
+                        # "location": {"index": m.start()} # Local index in segment
+                    })
+                
+                for m in cn_en_dot_pattern.finditer(segment):
+                    issues.append({
+                        "issue_type": "Punctuation_Mixed",
+                        "severity": "Warning",
+                        "evidence": m.group(),
+                        "message": "中文文本使用了英文标点(.)",
+                        # "location": {"index": m.start()}
+                    })
+
+                for m in en_cn_punct_pattern.finditer(segment):
+                    issues.append({
+                        "issue_type": "Punctuation_Mixed",
+                        "severity": "Warning",
+                        "evidence": m.group(),
+                        "message": "英文文本使用了中文标点",
+                    })
 
         # 2. Citation Position Check
         if self.check_position:
-            # Check for Citation AFTER Punctuation (Error: .[1])
-            # Correct: [1]. or [1],
-            # Pattern: Punctuation followed by Citation
-            # Use positive lookbehind for punctuation to capture overlapping matches if needed, but simple iteration is usually fine
-            # Allow optional space between punctuation and citation
             punct_cite_pattern = re.compile(r"([，。,\.])\s*(\[\d+\])")
             
-            for m in punct_cite_pattern.finditer(content):
-                issues.append({
-                    "issue_type": "Citation_Position_Error",
-                    "severity": "Warning",
-                    "evidence": m.group(),
-                    "message": "引用标注位置错误 (应置于标点符号之前)",
-                    "location": {"index": m.start()}
-                })
+            for segment in segments_to_check:
+                for m in punct_cite_pattern.finditer(segment):
+                    issues.append({
+                        "issue_type": "Citation_Position_Inconsistent",
+                        "severity": "Warning",
+                        "evidence": m.group(),
+                        "message": "引用标注位置错误 (应置于标点符号之前)",
+                        # "location": {"index": m.start()}
+                    })
 
 class CitationChecker:
     """
@@ -285,10 +378,13 @@ class CitationChecker:
         elements = layout_data.get("elements", []) if isinstance(layout_data, dict) else []
         reference_texts = []
         for e in elements:
-            region = _element_get(e, "region")
-            text_value = _element_get(e, "content")
-            if region == "reference" and text_value:
-                reference_texts.append(str(text_value))
+            if _is_likely_reference(e):
+                text_value = _element_get(e, "content")
+                if text_value:
+                    reference_texts.append(str(text_value))
+        
+        # Sort or process reference texts if needed (layout analysis might be out of order?)
+        # For now, assume sequential.
         ref_nums = set(_extract_reference_numbers(reference_texts))
         numeric_citations = _extract_numeric_citations(text)
         author_year_citations = _extract_author_year_citations(text)
@@ -401,6 +497,83 @@ class SemanticChecker:
         self.punct_checker = PunctuationChecker(self.punct_checker.config)
         self.cite_checker = CitationChecker(self.cite_checker.config)
 
+    def _chunk_text(self, text: str, chunk_size: int = 5000, overlap: int = 500) -> List[str]:
+        """
+        Split text into chunks respecting paragraph boundaries.
+        If a paragraph is too long, split it by character count.
+        """
+        if not text:
+            return []
+            
+        paragraphs = text.split('\n')
+        chunks = []
+        
+        start_idx = 0
+        while start_idx < len(paragraphs):
+            current_len = 0
+            end_idx = start_idx
+            
+            # Expand end_idx until chunk_size is reached
+            while end_idx < len(paragraphs):
+                p_len = len(paragraphs[end_idx]) + 1 # +1 for newline
+                
+                # Check if adding this paragraph exceeds limit
+                if current_len + p_len > chunk_size:
+                    if current_len == 0:
+                        # Single huge paragraph - split by character count
+                        para = paragraphs[end_idx]
+                        s = 0
+                        while s < len(para):
+                            e = s + chunk_size
+                            chunks.append(para[s:e])
+                            if e >= len(para):
+                                break
+                            s = e - overlap
+                        
+                        start_idx += 1
+                        end_idx = start_idx # Signal processed
+                        break 
+                    else:
+                        # Stop here, don't include this paragraph in current chunk
+                        break
+                
+                current_len += p_len
+                end_idx += 1
+            
+            # If we processed a huge paragraph (current_len == 0 but incremented start_idx), continue
+            if current_len == 0:
+                if start_idx < len(paragraphs):
+                    continue
+                else:
+                    break
+                 
+            # If we formed a chunk
+            if end_idx > start_idx:
+                chunk_text = "\n".join(paragraphs[start_idx:end_idx])
+                chunks.append(chunk_text)
+            
+            if end_idx == len(paragraphs):
+                break
+                
+            # Calculate next start_idx based on overlap (backtrack from end_idx)
+            overlap_len = 0
+            next_start = end_idx
+            # Try to keep at least 'overlap' characters from the end of current chunk
+            while next_start > start_idx:
+                p_len = len(paragraphs[next_start-1]) + 1
+                if overlap_len + p_len > overlap:
+                    break
+                overlap_len += p_len
+                next_start -= 1
+            
+            # Ensure progress
+            if next_start == start_idx:
+                next_start += 1
+                
+            start_idx = next_start
+            
+        return chunks
+
     async def check(self, content: str, layout_data: Dict[str, Any]) -> Dict[str, Any]:
         """
         执行语义校验的主流程
@@ -410,56 +583,90 @@ class SemanticChecker:
         
         issues = []
         text_content = _resolve_text_content(content, layout_data)
+        print(f"DEBUG: text_content length: {len(text_content)}")
         
         # 1. 规则校验 (各模块独立执行)
-        self.typo_checker.check(text_content, issues)
-        self.term_checker.check(text_content, issues)
-        self.punct_checker.check(text_content, layout_data, issues)
-        self.cite_checker.check(text_content, layout_data, issues)
+        try:
+            print("DEBUG: Running typo_checker...", flush=True)
+            self.typo_checker.check(text_content, issues)
+        except Exception as e:
+            print(f"ERROR: typo_checker failed: {e}", flush=True)
+
+        try:
+            print("DEBUG: Running term_checker...", flush=True)
+            self.term_checker.check(text_content, issues)
+        except Exception as e:
+            print(f"ERROR: term_checker failed: {e}", flush=True)
+
+        try:
+            print("DEBUG: Running punct_checker...", flush=True)
+            self.punct_checker.check(text_content, layout_data, issues)
+        except Exception as e:
+            print(f"ERROR: punct_checker failed: {e}", flush=True)
+
+        try:
+            print("DEBUG: Running cite_checker...", flush=True)
+            self.cite_checker.check(text_content, layout_data, issues)
+            print("DEBUG: cite_checker finished.", flush=True)
+        except Exception as e:
+            print(f"ERROR: cite_checker failed: {e}", flush=True)
         
-        # 2. LLM 辅助扫描 (Gemini 1.5 Flash)
+        # 2. LLM 辅助扫描 (Gemini 1.5 Flash / Qwen)
         # 利用长上下文能力辅助扫描复杂格式问题
         # Ref: 分工明细 - LLM Scanner
-        llm_feedback = ""
-        try:
-            raw_response = await asyncio.wait_for(
-                self.llm_client.scan_document(text_content),
-                timeout=LLM_TIMEOUT_SEC
-            )
-            
-            if raw_response:
-                # Try to parse JSON output
-                cleaned = raw_response.strip()
-                if cleaned.startswith("```json"):
-                    cleaned = cleaned[7:]
-                if cleaned.endswith("```"):
-                    cleaned = cleaned[:-3]
-                cleaned = cleaned.strip()
-                
-                try:
-                    parsed = json.loads(cleaned)
-                    llm_issues = parsed.get("issues", [])
-                    llm_feedback = parsed.get("summary", "")
-                    
-                    # Merge LLM issues into main issues list
-                    for issue in llm_issues:
-                        # Normalize issue structure
-                        normalized_issue = {
-                            "issue_type": issue.get("issue_type", "LLM_Feedback"),
-                            "severity": issue.get("severity", "Warning"),
-                            "evidence": issue.get("evidence", "LLM Detection"),
-                            "message": issue.get("message", issue.get("description", "")),
-                            "suggestion": issue.get("suggestion", ""),
-                            "source": "LLM"
-                        }
-                        issues.append(normalized_issue)
-                        
-                except json.JSONDecodeError:
-                    # Fallback to raw text if not valid JSON
-                    llm_feedback = raw_response
-                    
-        except Exception:
+        if self.llm_client.provider == "none":
+            print("WARNING: LLM provider not configured or API Key missing. Skipping LLM scan.", flush=True)
             llm_feedback = ""
+            all_llm_issues = []
+        else:
+            print(f"DEBUG: Starting LLM scan with provider: {self.llm_client.provider}...", flush=True)
+            llm_feedback = ""
+            all_llm_issues = []
+            
+            try:
+                # Process text in chunks for LLM
+                # Reduce chunk size to 5000 to avoid timeouts/errors with Qwen
+                chunks = self._chunk_text(text_content, chunk_size=5000, overlap=500)
+                print(f"DEBUG: Chunks created: {len(chunks)}", flush=True)
+                
+                feedback_parts = []
+                
+                for i, chunk in enumerate(chunks):
+                    print(f"DEBUG: Processing chunk {i+1}/{len(chunks)}... Length: {len(chunk)}", flush=True)
+                    
+                    try:
+                        chunk_feedback = await self.llm_client.scan_document(chunk)
+                        if chunk_feedback:
+                            # Parse issues from this chunk
+                            chunk_issues, chunk_summary = self._parse_llm_response(chunk_feedback)
+                            
+                            # Use summary if available, otherwise raw feedback
+                            if chunk_summary:
+                                feedback_parts.append(chunk_summary)
+                            else:
+                                feedback_parts.append(chunk_feedback)
+                                
+                            # Tag issues as from LLM
+                            for issue in chunk_issues:
+                                issue["source"] = "LLM"
+                            all_llm_issues.extend(chunk_issues)
+                    except Exception as e:
+                        print(f"ERROR: Chunk {i+1} processing failed: {e}", flush=True)
+                        # Log error but continue with other chunks
+                        pass
+
+                
+                # Aggregate results
+                llm_feedback = "\n".join(feedback_parts)
+                print("DEBUG: LLM scan completed.", flush=True)
+            except Exception as e:
+                print(f"ERROR: LLM scan failed: {e}", flush=True)
+                import traceback
+                traceback.print_exc()
+        
+        # Merge LLM issues into main issues list
+        if all_llm_issues:
+            issues.extend(all_llm_issues)
         
         # 3. 结果融合与去重
         # 避免视觉层和语义层对同一问题的重复标注
@@ -470,6 +677,52 @@ class SemanticChecker:
             "llm_feedback": llm_feedback,
             "score": self._calculate_score(issues)
         }
+
+    def _parse_llm_response(self, response_text: str) -> Tuple[List[Dict], str]:
+        """
+        Parses the LLM response which is expected to be a JSON string.
+        Returns a tuple of (issues found by LLM, summary string).
+        """
+        issues = []
+        summary = ""
+        try:
+            # Clean response text
+            cleaned = response_text.strip()
+            if cleaned.startswith("```json"):
+                cleaned = cleaned[7:]
+            elif cleaned.startswith("```"):
+                cleaned = cleaned[3:]
+            if cleaned.endswith("```"):
+                cleaned = cleaned[:-3]
+            cleaned = cleaned.strip()
+            
+            parsed = json.loads(cleaned)
+            
+            # Handle different response formats
+            if isinstance(parsed, dict):
+                issues = parsed.get("issues", [])
+                summary = parsed.get("summary", "")
+            elif isinstance(parsed, list):
+                # If root is a list of issues
+                issues = parsed
+                
+        except json.JSONDecodeError:
+            # Fallback: try to find JSON object using regex if mixed with text
+            try:
+                match = re.search(r'\{.*\}', response_text, re.DOTALL)
+                if match:
+                    parsed = json.loads(match.group(0))
+                    if isinstance(parsed, dict):
+                        issues = parsed.get("issues", [])
+                        summary = parsed.get("summary", "")
+            except:
+                pass
+            
+        # Ensure issues is a list of dicts
+        if not isinstance(issues, list):
+            issues = []
+            
+        return issues, summary
 
     def _calculate_score(self, issues: List[Dict]) -> int:
         """
@@ -484,6 +737,8 @@ class SemanticChecker:
         critical = counts["Critical"]
         warning = counts["Warning"]
         info = counts["Info"]
-        deduction = 15 * critical + 6 * math.sqrt(warning) + 2 * math.sqrt(info)
+        # Relaxed scoring: Reduced weights to avoid 0 scores for initial testing
+        # Old: 15 * critical + 6 * sqrt(warning) + 2 * sqrt(info)
+        deduction = 5 * critical + 2 * math.sqrt(warning) + 0.5 * math.sqrt(info)
         score = 100 - int(round(deduction))
         return max(0, min(100, score))

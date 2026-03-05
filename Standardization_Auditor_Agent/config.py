@@ -1,6 +1,10 @@
 from enum import Enum
 from typing import List
 import os
+from dotenv import load_dotenv
+
+# 加载 .env 文件中的环境变量
+load_dotenv()
 
 # Agent基本信息
 AGENT_NAME = "Standardization_Auditor_Agent"
@@ -20,7 +24,7 @@ QWEN_MODEL_NAME = os.getenv("QWEN_MODEL_NAME", "qwen-plus")
 
 # LLM Provider: "gemini" or "qwen"
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "none")
-LLM_TIMEOUT_SEC = int(os.getenv("LLM_TIMEOUT_SEC", "8"))
+LLM_TIMEOUT_SEC = int(os.getenv("LLM_TIMEOUT_SEC", "60"))
 
 # 布局分析配置
 LAYOUT_ANALYSIS_TIMEOUT = int(os.getenv("LAYOUT_ANALYSIS_TIMEOUT", "300")) # 5分钟，适应长文档处理

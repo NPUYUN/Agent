@@ -283,5 +283,235 @@ LAYOUT_TIMEOUT: {LAYOUT_ANALYSIS_TIMEOUT}s
     return HTMLResponse(content=html_content)
 
 if __name__ == "__main__":
+    import argparse
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+
+    parser = argparse.ArgumentParser(description="Standardization Auditor Agent")
+    parser.add_argument("--pdf", help="Path to PDF file for direct auditing")
+    parser.add_argument("--output", help="Path to save validation report (JSON)")
+    args = parser.parse_args()
+
+    if args.pdf:
+        import fitz
+        import json
+        import numpy as np
+        import math
+        from datetime import datetime
+
+        class NpEncoder(json.JSONEncoder):
+            def default(self, obj):
+                if isinstance(obj, np.integer):
+                    return int(obj)
+                if isinstance(obj, np.floating):
+                    return float(obj)
+                if isinstance(obj, np.ndarray):
+                    return obj.tolist()
+                return super().default(obj)
+
+        async def run_audit():
+            # Load rules
+            try:
+                # Try loading from DB first
+                await rule_engine.load_rules_from_db()
+            except Exception:
+                # Fallback to loading from YAML if DB fails or not configured for CLI
+                pass
+            
+            # Update components
+            layout_analyzer.update_rules(rule_engine.rules)
+            semantic_checker.update_rules(rule_engine.rules)
+
+            pdf_path = args.pdf
+            if not os.path.exists(pdf_path):
+                print(f"Error: File not found: {pdf_path}")
+                return
+
+            print(f"Starting audit for: {pdf_path}")
+            
+            # 1. Extract text
+            doc = fitz.open(pdf_path)
+            text_content = ""
+            for page in doc:
+                text_content += page.get_text()
+            
+            # 2. Layout Analysis
+            print("Running Layout Analysis...")
+            layout_data = await layout_analyzer.analyze(pdf_path)
+            
+            # 3. Semantic Check
+            print("Running Semantic Check (powered by Qwen API)...")
+            semantic_result = await semantic_checker.check(text_content, layout_data)
+            
+            # 4. Merge Issues
+            layout_issues = layout_data.get("layout_result", {}).get("layout_issues", [])
+            semantic_issues = semantic_result.get("semantic_issues", [])
+            all_issues = layout_issues + semantic_issues
+            
+            # 5. Calculate Score
+            score = semantic_checker._calculate_score(all_issues)
+            
+            # Count issues by severity
+            counts = {"Critical": 0, "Warning": 0, "Info": 0}
+            for issue in all_issues:
+                level = issue.get("severity") or issue.get("level") or "Info"
+                if level not in counts: level = "Info"
+                counts[level] += 1
+            
+            critical = counts["Critical"]
+            warning = counts["Warning"]
+            info = counts["Info"]
+
+            # Determine Audit Level
+            audit_level = "PASS"
+            if score < 60:
+                audit_level = "CRITICAL"
+            elif score < 80:
+                audit_level = "WARNING"
+            
+            # 6. Console Summary
+            print("\n" + "="*60)
+            print(f"AUDIT REPORT: {os.path.basename(pdf_path)}")
+            print(f"SCORE: {score}/100 ({audit_level})")
+            print(f"TOTAL ISSUES: {len(all_issues)}")
+            print("="*60)
+            
+            issues_by_type = {}
+            for issue in all_issues:
+                t = issue.get("issue_type", "Other")
+                if t not in issues_by_type:
+                    issues_by_type[t] = []
+                issues_by_type[t].append(issue)
+            
+            for t, issues in issues_by_type.items():
+                print(f"\n[ {t} ] - {len(issues)} issues")
+                for i, issue in enumerate(issues[:3]): # Show top 3 in console
+                    msg = issue.get("message", "")
+                    pg = issue.get("page_num", "?")
+                    print(f"  - (Page {pg}) {msg}")
+                if len(issues) > 3:
+                    print(f"  ... and {len(issues)-3} more")
+
+            # 7. Generate Markdown Reports
+            # Determine output directory
+            # Default to "report" folder in the current working directory
+            output_dir = os.path.join(os.getcwd(), "report")
+            
+            if args.output:
+                # If extension exists, treat as file path and get its directory
+                if os.path.splitext(args.output)[1]:
+                    output_dir = os.path.dirname(args.output) or "."
+                else:
+                    # Otherwise treat as directory
+                    output_dir = args.output
+            
+            if not os.path.exists(output_dir):
+                os.makedirs(output_dir, exist_ok=True)
+
+            base_name = os.path.splitext(os.path.basename(pdf_path))[0]
+            score_report_path = os.path.join(output_dir, f"{base_name}_score_report.md")
+            deduction_report_path = os.path.join(output_dir, f"{base_name}_deduction_details.md")
+
+            # Generate Score Report
+            with open(score_report_path, "w", encoding="utf-8") as f:
+                f.write(f"# 论文格式审计评分报告\n\n")
+                f.write(f"**文件名**: {os.path.basename(pdf_path)}\n\n")
+                f.write(f"**审计时间**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+                f.write(f"## 审计结果\n")
+                f.write(f"- **总分**: {score}/100\n")
+                f.write(f"- **评级**: {audit_level}\n")
+                f.write(f"- **问题总数**: {len(all_issues)}\n\n")
+                
+                f.write("## 问题统计\n")
+                f.write(f"- **Critical (严重)**: {critical}\n")
+                f.write(f"- **Warning (警告)**: {warning}\n")
+                f.write(f"- **Info (提示)**: {info}\n\n")
+                
+                f.write("## 评分说明\n")
+                f.write("本系统采用非线性扣分机制，避免单一类问题导致分数过低：\n")
+                f.write("- **Critical**: 权重 5 (线性扣分)\n")
+                f.write("- **Warning**: 权重 2 (平方根非线性扣分)\n")
+                f.write("- **Info**: 权重 0.5 (平方根非线性扣分)\n\n")
+                
+                deduction = 5 * critical + 2 * math.sqrt(warning) + 0.5 * math.sqrt(info)
+                f.write(f"**总扣分计算**: `5 * {critical} + 2 * sqrt({warning}) + 0.5 * sqrt({info})` ≈ `{deduction:.2f}`\n")
+                f.write(f"**最终得分**: `100 - {int(round(deduction))}` = `{score}`\n")
+
+            # Generate Deduction Details Report
+            with open(deduction_report_path, "w", encoding="utf-8") as f:
+                f.write(f"# 论文格式审计扣分细则\n\n")
+                f.write(f"**文件名**: {os.path.basename(pdf_path)}\n")
+                f.write(f"**生成时间**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+                
+                if not all_issues:
+                    f.write("恭喜！未发现明显的格式问题。\n")
+                else:
+                    # 1. Layout Analysis (CV)
+                    f.write("## 1. 视觉布局分析 (CV Layout Analysis)\n")
+                    if not layout_issues:
+                        f.write("未发现布局问题。\n\n")
+                    else:
+                        layout_by_type = {}
+                        for issue in layout_issues:
+                            t = issue.get("issue_type", "Other")
+                            if t not in layout_by_type: layout_by_type[t] = []
+                            layout_by_type[t].append(issue)
+                        
+                        for t, issues in layout_by_type.items():
+                            f.write(f"### {t} ({len(issues)} 个问题)\n")
+                            for i, issue in enumerate(issues):
+                                msg = issue.get("message", "无描述")
+                                pg = issue.get("page_num", "?")
+                                severity = issue.get("severity", "Info")
+                                suggestion = issue.get("suggestion", "")
+                                
+                                f.write(f"#### {i+1}. [Page {pg}] {msg}\n")
+                                f.write(f"- **严重程度**: {severity}\n")
+                                if suggestion:
+                                    f.write(f"- **修改建议**: {suggestion}\n")
+                                f.write("\n")
+                    
+                    f.write("\n")
+
+                    # 2. Semantic Analysis (LLM)
+                    f.write("## 2. 语义内容分析 (LLM Semantic Analysis)\n")
+                    if not semantic_issues:
+                        f.write("未发现语义问题。\n\n")
+                    else:
+                        semantic_by_type = {}
+                        for issue in semantic_issues:
+                            t = issue.get("issue_type", "Other")
+                            if t not in semantic_by_type: semantic_by_type[t] = []
+                            semantic_by_type[t].append(issue)
+                        
+                        for t, issues in semantic_by_type.items():
+                            f.write(f"### {t} ({len(issues)} 个问题)\n")
+                            for i, issue in enumerate(issues):
+                                msg = issue.get("message", "无描述")
+                                pg = issue.get("page_num", "?")
+                                severity = issue.get("severity", "Info")
+                                suggestion = issue.get("suggestion", "")
+                                
+                                f.write(f"#### {i+1}. [Page {pg}] {msg}\n")
+                                f.write(f"- **严重程度**: {severity}\n")
+                                if suggestion:
+                                    f.write(f"- **修改建议**: {suggestion}\n")
+                                f.write("\n")
+
+            print(f"\nReports generated successfully:")
+            print(f"1. Score Report: {score_report_path}")
+            print(f"2. Deduction Details: {deduction_report_path}")
+
+            if args.output and args.output.endswith('.json'):
+                report = {
+                    "file": pdf_path,
+                    "score": score,
+                    "issues": all_issues
+                }
+                with open(args.output, "w", encoding="utf-8") as f:
+                    json.dump(report, f, cls=NpEncoder, ensure_ascii=False, indent=2)
+                print(f"3. JSON Report: {args.output}")
+
+        asyncio.run(run_audit())
+        
+    else:
+        uvicorn.run(app, host="127.0.0.1", port=8000)

@@ -2,11 +2,12 @@ from typing import Dict, Any, List, Optional, Tuple
 from pydantic import BaseModel
 import re
 import statistics
-from .pdf_utils import open_pdf, extract_blocks, is_encrypted, is_scanned_page, split_columns
+from .pdf_utils import open_pdf, extract_blocks, is_encrypted, is_scanned_page, split_columns, page_to_image
 from .layout_zones import is_reference_title, classify_line_region, is_caption
 from .layout_exceptions import ParseError, ParseReport
 from .layout_rules import check_citation_reference_match, load_rules
 from .layout_adapter import with_anchor
+from .vision_utils import detect_text_lines, to_gray
 
 
 class VisualElement(BaseModel):
@@ -80,6 +81,17 @@ class PDFParser:
             columns = split_columns(blocks, page_rect.width)
             if len(columns) > 1:
                 parse_report.multi_column_pages += 1
+
+            # CV Analysis Integration
+            visual_lines = []
+            try:
+                img = page_to_image(page)
+                gray = to_gray(img)
+                visual_lines = detect_text_lines(gray)
+                parse_report.visual_elements_count += len(visual_lines)
+            except Exception:
+                pass
+
             font_sizes = []
             for b in blocks:
                 if b.get("type") != 0:
@@ -98,15 +110,27 @@ class PDFParser:
             else:
                 text_blocks = _sort_blocks([b for b in blocks if b.get("type") == 0])
             if not text_blocks:
-                elements.append(
-                    VisualElement(
-                        type="image",
-                        content="",
-                        bbox=[0.0, 0.0, page_rect.width, page_rect.height],
-                        page_num=page_num,
-                        region="main",
+                # Use CV to check for scanned content
+                if visual_lines and len(visual_lines) > 5:
+                    elements.append(
+                        VisualElement(
+                            type="scanned_content",
+                            content="[SCANNED_CONTENT_DETECTED]",
+                            bbox=[0.0, 0.0, 1.0, 1.0],
+                            page_num=page_num,
+                            region="main",
+                        )
                     )
-                )
+                else:
+                    elements.append(
+                        VisualElement(
+                            type="image",
+                            content="",
+                            bbox=[0.0, 0.0, page_rect.width, page_rect.height],
+                            page_num=page_num,
+                            region="main",
+                        )
+                    )
                 continue
             for block in text_blocks:
                 block_bbox = _bbox_from_rect(block.get("bbox", (0, 0, 0, 0)))

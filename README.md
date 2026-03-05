@@ -91,28 +91,26 @@ pip install -r requirements.txt
 
 ### 3. 配置环境变量
 
-支持 **Gemini** (Google) 和 **Qwen** (DashScope/Aliyun) 双模型切换。
+支持 **Gemini** (Google) 和 **Qwen** (DashScope/Aliyun) 双模型切换。推荐使用 `.env` 文件进行配置。
 
-**Windows (PowerShell):**
-```powershell
-# 基础配置
-$env:LOG_LEVEL="INFO"
-$env:DATABASE_URL="postgresql+asyncpg://user:pass@localhost/dbname"
+1. 在 `Standardization_Auditor_Agent` 目录下复制 `.env` 模板（如果不存在，请新建）：
+2. 编辑 `.env` 文件，填入您的 API Key：
 
-# LLM 选择 (gemini 或 qwen)
-$env:LLM_PROVIDER="qwen"
+```ini
+# LLM Configuration
+LLM_PROVIDER=qwen
 
-# Qwen 配置 (推荐，兼容模式)
-$env:QWEN_API_KEY="sk-..."
-$env:QWEN_BASE_URL="https://dashscope.aliyuncs.com/compatible-mode/v1"
-$env:QWEN_MODEL_NAME="qwen-plus"
+# Qwen API Configuration (DashScope)
+QWEN_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+QWEN_MODEL_NAME=qwen-plus
+QWEN_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 
-# Gemini 配置 (备用)
-$env:GOOGLE_API_KEY="your_google_api_key"
-$env:GEMINI_MODEL_NAME="gemini-1.5-flash"
+# Timeout settings
+LLM_TIMEOUT_SEC=60
+LAYOUT_ANALYSIS_TIMEOUT=300
 
-# 布局分析超时时间 (秒)
-$env:LAYOUT_ANALYSIS_TIMEOUT="300"
+# Database Configuration (Optional)
+# DATABASE_URL=postgresql+asyncpg://user:password@localhost/dbname
 ```
 
 ### 4. 初始化数据库
@@ -121,10 +119,26 @@ $env:LAYOUT_ANALYSIS_TIMEOUT="300"
 python ensure_db.py
 ```
 
-### 5. 运行 Agent
+### 5. 运行审计
+
+#### 方式一：CLI 命令行直接审计 PDF
+
+无需启动服务器，直接对本地 PDF 文件进行审计并生成 Markdown 报告。
 
 ```bash
-python main.py
+cd Standardization_Auditor_Agent
+python main.py --pdf "path/to/your/paper.pdf"
+```
+
+**输出结果**：
+默认会在当前目录下的 `report` 文件夹生成两份报告：
+- `*_score_report.md`: 评分报告（总分、评级、各类问题统计）。
+- `*_deduction_details.md`: 扣分细则（包含 CV 视觉布局分析 和 LLM 语义内容分析的详细问题列表）。
+
+#### 方式二：启动 API 服务
+
+```bash
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
 服务默认运行在 `http://0.0.0.0:8000`。
 

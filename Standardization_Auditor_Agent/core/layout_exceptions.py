@@ -12,3 +12,4 @@ class ParseReport(BaseModel):
     encrypted: bool = False
     scanned_pages: int = 0
     multi_column_pages: int = 0
+    visual_elements_count: int = 0

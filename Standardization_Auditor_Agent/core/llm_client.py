@@ -4,7 +4,8 @@ from openai import AsyncOpenAI
 from typing import Optional
 from config import (
     GEMINI_MODEL_NAME, GOOGLE_API_KEY,
-    QWEN_API_KEY, QWEN_BASE_URL, QWEN_MODEL_NAME, LLM_PROVIDER
+    QWEN_API_KEY, QWEN_BASE_URL, QWEN_MODEL_NAME, LLM_PROVIDER,
+    LLM_TIMEOUT_SEC
 )
 from core.prompts import SYSTEM_PROMPT_MAIN as SYSTEM_PROMPT
 
@@ -68,7 +69,10 @@ class LLMClient:
                 config=config
             )
             return response.text
-        except Exception:
+        except Exception as e:
+            print(f"LLM Error (Gemini): {e}", flush=True)
+            import traceback
+            traceback.print_exc()
             return ""
 
     async def _scan_with_qwen(self, content: str, temperature: float) -> str:
@@ -84,9 +88,13 @@ class LLMClient:
                 ],
                 temperature=temperature,
                 max_tokens=2000, # Qwen max output limitation
+                timeout=LLM_TIMEOUT_SEC,
             )
             return response.choices[0].message.content
-        except Exception:
+        except Exception as e:
+            print(f"LLM Error (Qwen): {e}", flush=True)
+            import traceback
+            traceback.print_exc()
             return ""
 
 # 为了兼容旧代码，保留 GeminiClient 别名，但建议迁移到 LLMClient
