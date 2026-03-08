@@ -40,7 +40,8 @@ def _is_likely_reference(element: Any) -> bool:
             # 卷, 期, 页, 学报, 会议, 论文集, 出版社
             # Standard GB/T 7714 type indicators: [J], [C], [D], [M], [EB/OL], etc.
             # Common abbreviations: et al., eds.
-            pattern = r"(vol\.|pp\.|no\.|doi|http|isbn|issn|journal|conference|proceedings|trans\.|rev\.|arxiv|学报|会议|论文集|出版社|pages|et al\.?|eds\.?|\[[A-Z]{1,2}(/[A-Z]+)?\])"
+            # Added "Reference", "References" for title lines if they slip in
+            pattern = r"(vol\.|pp\.|no\.|doi|http|isbn|issn|journal|conference|proceedings|trans\.|rev\.|arxiv|reference|references|学报|会议|论文集|出版社|pages|et al\.?|eds\.?|\[[A-Z]{1,2}(/[A-Z]+)?\])"
             if re.search(pattern, content, re.IGNORECASE):
                 return True
             
@@ -131,6 +132,65 @@ def _parse_author_year(citation: str) -> Optional[Dict[str, str]]:
         return None
     return {"author": author_match.group(1).lower(), "year": year_match.group(0)}
 
+
+class TextPageMapper:
+    """
+    Helper class to map text indices back to page numbers.
+    """
+    def __init__(self, layout_data: Dict[str, Any]):
+        self.elements = layout_data.get("elements", []) if isinstance(layout_data, dict) else []
+        self.mapping = []  # List of (start_idx, end_idx, page_num)
+        self.full_text = ""
+        self._build()
+
+    def _build(self):
+        parts = []
+        current_pos = 0
+        for e in self.elements:
+            text = _element_get(e, "content")
+            pg = _element_get(e, "page_num")
+            if text:
+                text_str = str(text)
+                length = len(text_str)
+                # Map this segment to page
+                self.mapping.append((current_pos, current_pos + length, pg))
+                parts.append(text_str)
+                current_pos += length + 1  # +1 for newline
+        self.full_text = "\n".join(parts)
+
+    def get_page_num(self, index: int) -> str:
+        # Binary search could be better but linear is fine for now
+        for start, end, pg in self.mapping:
+            if start <= index < end:
+                return str(pg) if pg is not None else "?"
+        return "?"
+
+    def get_page_range(self, start_idx: int, end_idx: int) -> str:
+        pages = set()
+        for start, end, pg in self.mapping:
+            # Check overlap
+            if max(start, start_idx) < min(end, end_idx):
+                if pg is not None:
+                    pages.add(str(pg))
+        
+        if not pages:
+            return "?"
+        
+        # Try to sort numerically
+        try:
+            sorted_pages = sorted(list(pages), key=lambda x: int(x) if str(x).isdigit() else 9999)
+        except:
+            sorted_pages = sorted(list(pages))
+
+        if not sorted_pages:
+            return "?"
+            
+        if len(sorted_pages) == 1:
+            return str(sorted_pages[0])
+        else:
+            return f"{sorted_pages[0]}-{sorted_pages[-1]}"
+
+
 import difflib
 
 class TypoChecker:
@@ -143,7 +203,7 @@ class TypoChecker:
         self.max_typos_total = config.get("max_typos_total_warning", 10)
         self.critical_keywords = config.get("critical_keywords", [])
 
-    def check(self, content: str, issues: List[Dict]):
+    def check(self, content: str, issues: List[Dict], mapper: Optional['TextPageMapper'] = None):
         """
         1. 集成中文分词/错别字检测工具
         2. 上下文语义纠错 (排除专业名词歧义)
@@ -156,8 +216,10 @@ class TypoChecker:
         found_typos = []
 
         # 1. Critical Keywords Check (Fuzzy Matching)
-        # 简单分词 (按空格和标点)
-        words = re.findall(r"\b\w+\b", content)
+        # Find all word occurrences with their positions
+        word_matches = list(re.finditer(r"\b\w+\b", content))
+        words = [m.group() for m in word_matches]
+        
         # 对每个关键术语，寻找文本中相似但不完全相同的词
         for keyword in self.critical_keywords:
             # 忽略大小写比较，如果 text 中有 deep learning 而 keyword 是 Deep Learning
@@ -179,15 +241,23 @@ class TypoChecker:
                     # 排除常见复数形式 (简单的 heuristic)
                     if match == keyword + "s" or match == keyword + "es":
                         continue
-                        
-                    issues.append({
-                        "issue_type": "Critical_Keyword_Typo",
-                        "severity": "Critical",
-                        "evidence": match,
-                        "message": f"关键术语拼写错误: '{match}' 应为 '{keyword}'"
-                    })
-                    typo_count += 1
-                    found_typos.append(match)
+                    
+                    # Find specific occurrences
+                    instances = [m for m in word_matches if m.group() == match]
+                    for instance in instances:
+                        pg = "?"
+                        if mapper:
+                            pg = mapper.get_page_num(instance.start())
+                            
+                        issues.append({
+                            "issue_type": "Critical_Keyword_Typo",
+                            "severity": "Critical",
+                            "evidence": match,
+                            "page_num": pg,
+                            "message": f"关键术语拼写错误: '{match}' 应为 '{keyword}'"
+                        })
+                        typo_count += 1
+                        found_typos.append(match)
 
         # 2. 通用错别字检测 (模拟/占位)
         # 在没有 NLP 库的情况下，暂时只统计上述发现的 Critical Typos
@@ -212,7 +282,7 @@ class TerminologyChecker:
         self.terms = config.get("terms", {})
         self.forbidden_variants = config.get("forbidden_variants", {})
 
-    def check(self, content: str, issues: List[Dict]):
+    def check(self, content: str, issues: List[Dict], mapper: Optional['TextPageMapper'] = None):
         """
         1. 提取专有名词，建立临时术语库
         2. 检测写法不一致 (如 'Deep Learning' vs 'deep-learning')
@@ -237,22 +307,30 @@ class TerminologyChecker:
                 pattern = re.escape(canonical)
                 
             # Find ALL occurrences (case-insensitive)
-            # Note: This simple regex approach works best for English terms.
-            # For strict matching, we might need more complex logic.
-            matches = re.findall(pattern, content, flags=re.IGNORECASE)
+            matches = re.finditer(pattern, content, flags=re.IGNORECASE)
             
             # Check if any found match is NOT in the allowed set
             inconsistent_usages = set()
-            for usage in matches:
+            found_pages = set()
+            for m in matches:
+                usage = m.group()
                 if usage not in allowed_forms:
                     inconsistent_usages.add(usage)
+                    if mapper:
+                        found_pages.add(mapper.get_page_num(m.start()))
             
             if inconsistent_usages:
+                pg_str = "?"
+                if found_pages:
+                    sorted_pgs = sorted(list(found_pages), key=lambda x: int(x) if x.isdigit() else 999)
+                    pg_str = ", ".join(sorted_pgs)
+                    
                 issues.append(
                     {
                         "issue_type": "Terminology_Inconsistent",
                         "severity": "Warning",
                         "evidence": ", ".join(inconsistent_usages),
+                        "page_num": pg_str,
                         "message": f"术语写法不一致，建议统一为：{canonical}",
                     }
                 )
@@ -260,18 +338,37 @@ class TerminologyChecker:
         # Check forbidden variants
         for canonical, forbidden in self.forbidden_variants.items():
             found_forbidden = []
+            found_pages = set()
             for form in forbidden or []:
-                if _term_found(content, form):
+                if re.search(r"[A-Za-z]", form):
+                    pattern_str = r"\b" + re.escape(form) + r"\b"
+                    matches = list(re.finditer(pattern_str, content, flags=re.IGNORECASE))
+                else:
+                    pattern_str = re.escape(form)
+                    matches = list(re.finditer(pattern_str, content))
+                
+                if matches:
                     found_forbidden.append(form)
+                    for m in matches:
+                        if mapper:
+                            found_pages.add(mapper.get_page_num(m.start()))
+                            
             if found_forbidden:
+                pg_str = "?"
+                if found_pages:
+                    sorted_pgs = sorted(list(found_pages), key=lambda x: int(x) if x.isdigit() else 999)
+                    pg_str = ", ".join(sorted_pgs)
+                    
                 issues.append(
                     {
                         "issue_type": "Terminology_Forbidden",
                         "severity": "Warning",
                         "evidence": ", ".join(found_forbidden),
+                        "page_num": pg_str,
                         "message": f"检测到不规范术语写法，建议使用：{canonical}",
                     }
                 )
+
 
 class PunctuationChecker:
     """
@@ -283,7 +380,7 @@ class PunctuationChecker:
         self.allow_mixed = config.get("allow_mixed_punctuation", False)
         self.check_position = config.get("check_citation_position", True)
 
-    def check(self, content: str, layout_data: Dict[str, Any], issues: List[Dict]):
+    def check(self, content: str, layout_data: Dict[str, Any], issues: List[Dict], mapper: Optional['TextPageMapper'] = None):
         """
         1. 杜绝中英文标点混用
         2. 标点位置错误 (如引用标注在标点外)
@@ -291,22 +388,8 @@ class PunctuationChecker:
         if not content:
             return
 
-        # Prepare text segments to check (excluding 'reference' region)
-        segments_to_check = []
-        
-        # If we have layout data with elements, use it to filter
+        # Use elements directly to get page numbers
         elements = layout_data.get("elements", []) if isinstance(layout_data, dict) else []
-        if elements:
-            for e in elements:
-                # Skip reference region (including heuristic detection)
-                if _is_likely_reference(e):
-                    continue
-                text_val = _element_get(e, "content")
-                if text_val:
-                    segments_to_check.append(str(text_val))
-        else:
-            # Fallback to full content if no elements
-            segments_to_check.append(content)
 
         # 1. Mixed Punctuation Check
         if not self.allow_mixed:
@@ -317,46 +400,62 @@ class PunctuationChecker:
             # 1c. English text using Chinese punctuation
             en_cn_punct_pattern = re.compile(r"[a-zA-Z]\s*[，。？！；：]")
             
-            for segment in segments_to_check:
-                for m in cn_en_punct_pattern.finditer(segment):
-                    issues.append({
-                        "issue_type": "Punctuation_Mixed",
-                        "severity": "Warning",
-                        "evidence": m.group(),
-                        "message": "中文文本使用了英文标点",
-                        # "location": {"index": m.start()} # Local index in segment
-                    })
+            for e in elements:
+                if _is_likely_reference(e):
+                    continue
+                text_val = _element_get(e, "content")
+                pg = _element_get(e, "page_num") or "?"
                 
-                for m in cn_en_dot_pattern.finditer(segment):
-                    issues.append({
-                        "issue_type": "Punctuation_Mixed",
-                        "severity": "Warning",
-                        "evidence": m.group(),
-                        "message": "中文文本使用了英文标点(.)",
-                        # "location": {"index": m.start()}
-                    })
+                if text_val:
+                    segment = str(text_val)
+                    for m in cn_en_punct_pattern.finditer(segment):
+                        issues.append({
+                            "issue_type": "Punctuation_Mixed",
+                            "severity": "Warning",
+                            "evidence": m.group(),
+                            "page_num": pg,
+                            "message": "中文文本使用了英文标点",
+                        })
+                    
+                    for m in cn_en_dot_pattern.finditer(segment):
+                        issues.append({
+                            "issue_type": "Punctuation_Mixed",
+                            "severity": "Warning",
+                            "evidence": m.group(),
+                            "page_num": pg,
+                            "message": "中文文本使用了英文标点(.)",
+                        })
 
-                for m in en_cn_punct_pattern.finditer(segment):
-                    issues.append({
-                        "issue_type": "Punctuation_Mixed",
-                        "severity": "Warning",
-                        "evidence": m.group(),
-                        "message": "英文文本使用了中文标点",
-                    })
+                    for m in en_cn_punct_pattern.finditer(segment):
+                        issues.append({
+                            "issue_type": "Punctuation_Mixed",
+                            "severity": "Warning",
+                            "evidence": m.group(),
+                            "page_num": pg,
+                            "message": "英文文本使用了中文标点",
+                        })
 
         # 2. Citation Position Check
         if self.check_position:
             punct_cite_pattern = re.compile(r"([，。,\.])\s*(\[\d+\])")
             
-            for segment in segments_to_check:
-                for m in punct_cite_pattern.finditer(segment):
-                    issues.append({
-                        "issue_type": "Citation_Position_Inconsistent",
-                        "severity": "Warning",
-                        "evidence": m.group(),
-                        "message": "引用标注位置错误 (应置于标点符号之前)",
-                        # "location": {"index": m.start()}
-                    })
+            for e in elements:
+                if _is_likely_reference(e):
+                    continue
+                text_val = _element_get(e, "content")
+                pg = _element_get(e, "page_num") or "?"
+                
+                if text_val:
+                    segment = str(text_val)
+                    for m in punct_cite_pattern.finditer(segment):
+                        issues.append({
+                            "issue_type": "Citation_Position_Inconsistent",
+                            "severity": "Warning",
+                            "evidence": m.group(),
+                            "page_num": pg,
+                            "message": "引用标注位置错误 (应置于标点符号之前)",
+                        })
+
 
 class CitationChecker:
     """
@@ -367,7 +466,7 @@ class CitationChecker:
         self.config = config
         self.style = config.get("style", "IEEE")
 
-    def check(self, content: str, layout_data: Dict[str, Any], issues: List[Dict]):
+    def check(self, content: str, layout_data: Dict[str, Any], issues: List[Dict], mapper: Optional['TextPageMapper'] = None):
         """
         1. 引用风格一致性 (IEEE vs APA)
         2. 引用标注与参考文献条目匹配 (语义匹配)
@@ -388,6 +487,7 @@ class CitationChecker:
         ref_nums = set(_extract_reference_numbers(reference_texts))
         numeric_citations = _extract_numeric_citations(text)
         author_year_citations = _extract_author_year_citations(text)
+        
         if numeric_citations and author_year_citations:
             issues.append(
                 {
@@ -418,6 +518,7 @@ class CitationChecker:
             )
         if not self.config.get("check_reference_matching", True):
             return
+            
         if not reference_texts and (numeric_citations or author_year_citations):
             issues.append(
                 {
@@ -428,24 +529,38 @@ class CitationChecker:
                 }
             )
             return
+            
         if numeric_citations:
-            for group in numeric_citations:
-                for num in re.findall(r"\d+", group):
-                    if num not in ref_nums:
-                        issues.append(
-                            {
-                                "issue_type": "Citation_Reference_Missing",
-                                "severity": "Warning",
-                                "evidence": f"[{num}]",
-                                "message": "引用标注未在参考文献中找到对应编号",
-                            }
-                        )
+            # Re-scan to find locations
+            for m in re.finditer(r"\[(\d+(?:\s*,\s*\d+)*)\]", text):
+                citation_text = m.group(0)
+                nums_in_cite = re.findall(r"\d+", citation_text)
+                missing_nums = [n for n in nums_in_cite if n not in ref_nums]
+                
+                if missing_nums:
+                    pg = mapper.get_page_num(m.start()) if mapper else "?"
+                    for missing in missing_nums:
+                        issues.append({
+                            "issue_type": "Citation_Reference_Missing",
+                            "severity": "Warning",
+                            "evidence": f"[{missing}]",
+                            "page_num": pg,
+                            "message": "引用标注未在参考文献中找到对应编号",
+                        })
+
         if author_year_citations and reference_texts:
             ref_lower = [r.lower() for r in reference_texts]
-            for citation in author_year_citations:
-                parsed = _parse_author_year(citation)
+            
+            # Re-scan to find locations
+            for m in re.finditer(r"\(([^()]*\d{4}[a-z]?[^()]*)\)", text):
+                citation_inner = m.group(1)
+                if not re.search(r"[A-Za-z]", citation_inner):
+                    continue
+                    
+                parsed = _parse_author_year(citation_inner)
                 if not parsed:
                     continue
+                    
                 author = parsed["author"]
                 year = parsed["year"]
                 matched = False
@@ -453,15 +568,19 @@ class CitationChecker:
                     if year in line and author in line:
                         matched = True
                         break
+                
                 if not matched:
+                    pg = mapper.get_page_num(m.start()) if mapper else "?"
                     issues.append(
                         {
                             "issue_type": "Citation_Reference_Missing",
                             "severity": "Warning",
-                            "evidence": citation,
+                            "evidence": m.group(0),
+                            "page_num": pg,
                             "message": "作者-年份引用未在参考文献中找到对应条目",
                         }
                     )
+
 
 class SemanticChecker:
     """
@@ -582,31 +701,39 @@ class SemanticChecker:
         # self.rule_engine.reload() 
         
         issues = []
-        text_content = _resolve_text_content(content, layout_data)
+        
+        # Initialize Mapper
+        mapper = TextPageMapper(layout_data)
+        # Use mapper's text to ensure consistency with indices
+        text_content = mapper.full_text
+        if not text_content:
+            # Fallback if mapper produced empty text (e.g. no elements)
+            text_content = _resolve_text_content(content, layout_data)
+        
         print(f"DEBUG: text_content length: {len(text_content)}")
         
         # 1. 规则校验 (各模块独立执行)
         try:
             print("DEBUG: Running typo_checker...", flush=True)
-            self.typo_checker.check(text_content, issues)
+            self.typo_checker.check(text_content, issues, mapper)
         except Exception as e:
             print(f"ERROR: typo_checker failed: {e}", flush=True)
 
         try:
             print("DEBUG: Running term_checker...", flush=True)
-            self.term_checker.check(text_content, issues)
+            self.term_checker.check(text_content, issues, mapper)
         except Exception as e:
             print(f"ERROR: term_checker failed: {e}", flush=True)
 
         try:
             print("DEBUG: Running punct_checker...", flush=True)
-            self.punct_checker.check(text_content, layout_data, issues)
+            self.punct_checker.check(text_content, layout_data, issues, mapper)
         except Exception as e:
             print(f"ERROR: punct_checker failed: {e}", flush=True)
 
         try:
             print("DEBUG: Running cite_checker...", flush=True)
-            self.cite_checker.check(text_content, layout_data, issues)
+            self.cite_checker.check(text_content, layout_data, issues, mapper)
             print("DEBUG: cite_checker finished.", flush=True)
         except Exception as e:
             print(f"ERROR: cite_checker failed: {e}", flush=True)
@@ -630,9 +757,28 @@ class SemanticChecker:
                 print(f"DEBUG: Chunks created: {len(chunks)}", flush=True)
                 
                 feedback_parts = []
+                last_pos = 0
                 
                 for i, chunk in enumerate(chunks):
                     print(f"DEBUG: Processing chunk {i+1}/{len(chunks)}... Length: {len(chunk)}", flush=True)
+                    
+                    # Calculate page range for this chunk
+                    page_range = "?"
+                    start_pos = text_content.find(chunk, last_pos)
+                    # If not found (shouldn't happen), try from 0
+                    if start_pos == -1:
+                        start_pos = text_content.find(chunk)
+                    
+                    if start_pos != -1:
+                        end_pos = start_pos + len(chunk)
+                        page_range = mapper.get_page_range(start_pos, end_pos)
+                        # Advance last_pos, but allow for overlap (next chunk starts before this one ends)
+                        # We just need to ensure we don't find the SAME chunk instance again if there are duplicates?
+                        # Since chunks are sequential, simple find from last_pos is usually safe.
+                        # Ideally last_pos should track 'processed up to'.
+                        # But chunks overlap. Next chunk will start around 'end_pos - overlap'.
+                        # So let's update last_pos to start_pos + 1 to be safe.
+                        last_pos = start_pos + 1
                     
                     try:
                         chunk_feedback = await self.llm_client.scan_document(chunk)
@@ -646,14 +792,18 @@ class SemanticChecker:
                             else:
                                 feedback_parts.append(chunk_feedback)
                                 
-                            # Tag issues as from LLM
+                            # Tag issues as from LLM and add page range
                             for issue in chunk_issues:
                                 issue["source"] = "LLM"
+                                if "page_num" not in issue or issue["page_num"] == "?":
+                                    issue["page_num"] = page_range
+                                    
                             all_llm_issues.extend(chunk_issues)
                     except Exception as e:
                         print(f"ERROR: Chunk {i+1} processing failed: {e}", flush=True)
                         # Log error but continue with other chunks
                         pass
+
 
                 
                 # Aggregate results
@@ -722,7 +872,30 @@ class SemanticChecker:
         if not isinstance(issues, list):
             issues = []
             
-        return issues, summary
+        # Post-process issues to handle false positives from LLM
+        filtered_issues = []
+        for issue in issues:
+            # Fix for "Citation_Placeholder" being too aggressive on isolated lines
+            # If evidence looks like a valid citation (e.g. [12], [21,23]), it's likely a layout/parsing artifact, not a missing placeholder.
+            if issue.get("issue_type") == "Citation_Placeholder":
+                evidence = issue.get("evidence", "").strip()
+                msg = issue.get("message", "")
+                
+                # Condition 1: Evidence is a valid citation pattern
+                is_valid_citation = bool(re.match(r"^\[[\d,\s-]+\]$", evidence))
+                
+                # Condition 2: Message explicitly mentions "isolated" or "single line" citations
+                # and contains citation-like patterns
+                is_isolated_msg = ("孤立" in msg or "单独成行" in msg) and re.search(r"\[\d+(?:,\s*\d+)*\]", msg)
+                
+                if is_valid_citation or is_isolated_msg:
+                    issue["severity"] = "Info"
+                    issue["message"] += " (疑似排版或解析造成的孤立行，非内容缺失)"
+                    issue["issue_type"] = "Citation_Layout_Check"
+            
+            filtered_issues.append(issue)
+            
+        return filtered_issues, summary
 
     def _calculate_score(self, issues: List[Dict]) -> int:
         """

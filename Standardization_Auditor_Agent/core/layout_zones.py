@@ -3,11 +3,13 @@ import re
 
 
 def is_reference_title(text: str) -> bool:
-    return text.strip() in {"参考文献", "参考文献："}
+    t = text.strip().replace(" ", "")
+    return t in {"参考文献", "参考文献：", "Reference", "References"}
 
 
 def is_caption(text: str) -> bool:
-    return re.match(r"^(图|表)\s*\d+", text) is not None
+    # Use re.IGNORECASE to support both "Table" and "table"
+    return re.match(r"^(图|表|Figure|Fig\.|Table)\s*\d+", text, re.IGNORECASE) is not None
 
 
 def is_formula_text(text: str) -> bool:
@@ -35,7 +37,7 @@ def classify_line_region(text: str, font_size: float, body_font: float, referenc
         return "formula"
     if is_heading_text(text) or font_size >= body_font * 1.3:
         return "title"
-    if re.search(r"\[\d+(?:,\s*\d+)*\]", text):
+    if re.search(r"\[\d+(?:,\s*\d+)*\]", text) and (len(text) < 100 or re.match(r"^\s*\[\d+\]", text)):
         return "citation"
     return "main"
 

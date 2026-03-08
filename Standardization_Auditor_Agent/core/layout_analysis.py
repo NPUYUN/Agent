@@ -277,27 +277,35 @@ class VisualValidator:
                         }
                     )
         for c in captions:
-            same_page_images = [i for i in images if i.page_num == c.page_num]
-            if not same_page_images:
-                issues.append(
-                    {
-                        "issue_type": "Label_Missing",
-                        "severity": "Warning",
-                        "page_num": c.page_num,
-                        "bbox": c.bbox,
-                        "evidence": c.content,
-                        "message": "图表标题未匹配到图像区域",
-                        "location": {"page": c.page_num, "bbox": c.bbox}
-                    }
-                )
-                continue
-            nearest = min(
-                same_page_images,
-                key=lambda i: abs(i.bbox[1] - c.bbox[1]),
-            )
+            # Skip check for Tables if they are not represented as images
+            is_figure = bool(re.match(r"^(图|Figure|Fig\.)", c.content, re.IGNORECASE))
+            is_table = bool(re.match(r"^(表|Table)", c.content, re.IGNORECASE))
             
-            # Dynamic Rule Check: Figure Caption
-            if c.content.startswith("图"):
+            same_page_images = [i for i in images if i.page_num == c.page_num]
+            
+            # For figures, we expect an image nearby.
+            if is_figure:
+                if not same_page_images:
+                    # Downgrade to Info or skip if no images found at all on page (might be vector graphics)
+                    issues.append(
+                        {
+                            "issue_type": "Label_Missing",
+                            "severity": "Info", # Downgrade from Warning
+                            "page_num": c.page_num,
+                            "bbox": c.bbox,
+                            "evidence": c.content,
+                            "message": "图标题所在的页面未检测到图片对象 (可能是矢量图或解析遗漏)",
+                            "location": {"page": c.page_num, "bbox": c.bbox}
+                        }
+                    )
+                    continue
+                
+                nearest = min(
+                    same_page_images,
+                    key=lambda i: abs(i.bbox[1] - c.bbox[1]),
+                )
+                
+                # Check position (Bottom)
                 if fig_caption_pos == "bottom" and c.bbox[1] < nearest.bbox[1]:
                      issues.append({
                         "issue_type": "Label_Missing",
@@ -319,28 +327,10 @@ class VisualValidator:
                         "location": {"page": c.page_num, "bbox": c.bbox}
                     })
 
-            # Dynamic Rule Check: Table Caption
-            if c.content.startswith("表"):
-                if table_caption_pos == "top" and c.bbox[1] > nearest.bbox[1]:
-                    issues.append({
-                        "issue_type": "Label_Missing",
-                        "severity": "Warning",
-                        "page_num": c.page_num,
-                        "bbox": c.bbox,
-                        "evidence": c.content,
-                        "message": f"表标题应位于表上方 (规则要求: {table_caption_pos})",
-                        "location": {"page": c.page_num, "bbox": c.bbox}
-                    })
-                elif table_caption_pos == "bottom" and c.bbox[1] < nearest.bbox[1]:
-                    issues.append({
-                        "issue_type": "Label_Missing",
-                        "severity": "Warning",
-                        "page_num": c.page_num,
-                        "bbox": c.bbox,
-                        "evidence": c.content,
-                        "message": f"表标题应位于表下方 (规则要求: {table_caption_pos})",
-                        "location": {"page": c.page_num, "bbox": c.bbox}
-                    })
+            # For tables, we usually don't have "image" objects for them, so we skip image matching.
+            # Only check position if we can identify table body (not implemented yet), so just skip Label_Missing for tables.
+            if is_table:
+                pass # TODO: Implement table body detection for position check
         return issues
 
     def _check_formulas(self, elements: List[VisualElement]) -> List[Dict[str, Any]]:
@@ -360,7 +350,14 @@ class VisualValidator:
             for m in re.finditer(r"(式|公式)\s*(\d+)", t.content):
                 ref_nums.add(m.group(2))
         for f in formulas:
-            num_match = re.search(r"(（|\()(\d+)(）|\))$", f.content)
+            # Allow number formats like (1), (1.1), (1-1) and allow trailing spaces
+            num_match = re.search(r"(（|\()(\d+(?:[.-]\d+)*)(）|\))\s*$", f.content)
+            if not num_match:
+                # Fallback: check if the number is at the beginning (left-aligned case) or just separated
+                # Some PDFs might have "(1) formula" or "formula (1)"
+                # But here we stick to the end for standard cases, but relax regex
+                pass
+            
             if not num_match:
                 issues.append(
                     {

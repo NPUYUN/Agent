@@ -18,9 +18,10 @@ from .layout_schema import LayoutIssue
 def check_citation_reference_match(citations: List[Any], references: List[Any]) -> List[LayoutIssue]:
     ref_nums = set()
     for r in references:
-        m = re.match(r"^\[(\d+)\]|^(\d+)\.", r.content)
+        # Support [1], (1), 1., 1 (space)
+        m = re.match(r"^\s*(?:\[\s*(\d+)\s*\]|\(\s*(\d+)\s*\)|(\d+)\.|(\d+)\s)", r.content)
         if m:
-            num = m.group(1) or m.group(2)
+            num = next((g for g in m.groups() if g is not None), None)
             if num:
                 ref_nums.add(num)
     issues: List[LayoutIssue] = []

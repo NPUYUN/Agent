@@ -22,7 +22,12 @@ QWEN_API_KEY = os.getenv("QWEN_API_KEY", "")
 QWEN_BASE_URL = os.getenv("QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
 QWEN_MODEL_NAME = os.getenv("QWEN_MODEL_NAME", "qwen-plus")
 
-# LLM Provider: "gemini" or "qwen"
+# DeepSeek 配置
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
+DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+DEEPSEEK_MODEL_NAME = os.getenv("DEEPSEEK_MODEL_NAME", "deepseek-chat")
+
+# LLM Provider: "gemini", "qwen" or "deepseek"
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "none")
 LLM_TIMEOUT_SEC = int(os.getenv("LLM_TIMEOUT_SEC", "60"))
 

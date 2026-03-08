@@ -91,17 +91,23 @@ pip install -r requirements.txt
 
 ### 3. 配置环境变量
 
-支持 **Gemini** (Google) 和 **Qwen** (DashScope/Aliyun) 双模型切换。推荐使用 `.env` 文件进行配置。
+支持 **Gemini** (Google), **Qwen** (DashScope/Aliyun) 和 **DeepSeek** (OpenAI Compatible) 多模型切换。推荐使用 `.env` 文件进行配置。
 
 1. 在 `Standardization_Auditor_Agent` 目录下复制 `.env` 模板（如果不存在，请新建）：
 2. 编辑 `.env` 文件，填入您的 API Key：
 
 ```ini
 # LLM Configuration
-LLM_PROVIDER=qwen
+# Options: gemini, qwen, deepseek
+LLM_PROVIDER=deepseek
 
-# Qwen API Configuration (DashScope)
-QWEN_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+# DeepSeek API Configuration
+DEEPSEEK_API_KEY=your_deepseek_api_key
+DEEPSEEK_MODEL_NAME=deepseek-chat
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+
+# Qwen API Configuration (Optional)
+QWEN_API_KEY=your_qwen_api_key
 QWEN_MODEL_NAME=qwen-plus
 QWEN_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 
