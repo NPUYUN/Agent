@@ -286,18 +286,8 @@ class VisualValidator:
             # For figures, we expect an image nearby.
             if is_figure:
                 if not same_page_images:
-                    # Downgrade to Info or skip if no images found at all on page (might be vector graphics)
-                    issues.append(
-                        {
-                            "issue_type": "Label_Missing",
-                            "severity": "Info", # Downgrade from Warning
-                            "page_num": c.page_num,
-                            "bbox": c.bbox,
-                            "evidence": c.content,
-                            "message": "图标题所在的页面未检测到图片对象 (可能是矢量图或解析遗漏)",
-                            "location": {"page": c.page_num, "bbox": c.bbox}
-                        }
-                    )
+                    # If no image object is found, it's very likely a vector graphic or parsing limitation.
+                    # To avoid false positives (user seeing the image but tool reporting error), we skip this check.
                     continue
                 
                 nearest = min(
@@ -305,8 +295,20 @@ class VisualValidator:
                     key=lambda i: abs(i.bbox[1] - c.bbox[1]),
                 )
                 
-                # Check position (Bottom)
-                if fig_caption_pos == "bottom" and c.bbox[1] < nearest.bbox[1]:
+                # Check distance: If nearest image is too far (e.g., > 1/3 page height), 
+                # assume the actual image was not detected (Info) instead of Warning about position.
+                # Estimate page height from max y on page (default A4 height ~842)
+                page_elements = [e for e in elements if e.page_num == c.page_num]
+                max_y = max((e.bbox[3] for e in page_elements), default=842.0)
+                
+                if abs(nearest.bbox[1] - c.bbox[1]) > max_y * 0.33:
+                    # Skip reporting if too far, assuming unrelated image
+                    continue
+
+                # Check position (Bottom) with tolerance
+                # Tolerance allows for slight overlaps or bounding box inaccuracies
+                tolerance = 5.0
+                if fig_caption_pos == "bottom" and c.bbox[1] < nearest.bbox[1] - tolerance:
                      issues.append({
                         "issue_type": "Label_Missing",
                         "severity": "Warning",
@@ -316,7 +318,7 @@ class VisualValidator:
                         "message": f"图标题应位于图下方 (规则要求: {fig_caption_pos})",
                         "location": {"page": c.page_num, "bbox": c.bbox}
                     })
-                elif fig_caption_pos == "top" and c.bbox[1] > nearest.bbox[1]:
+                elif fig_caption_pos == "top" and c.bbox[1] > nearest.bbox[1] + tolerance:
                      issues.append({
                         "issue_type": "Label_Missing",
                         "severity": "Warning",

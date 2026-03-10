@@ -752,8 +752,9 @@ class SemanticChecker:
             
             try:
                 # Process text in chunks for LLM
-                # Reduce chunk size to 5000 to avoid timeouts/errors with Qwen
-                chunks = self._chunk_text(text_content, chunk_size=5000, overlap=500)
+                # Increase chunk size to 15000 to reduce calls and preserve context (as requested by user)
+                # Modern LLMs (Gemini/Qwen) handle large context well.
+                chunks = self._chunk_text(text_content, chunk_size=15000, overlap=500)
                 print(f"DEBUG: Chunks created: {len(chunks)}", flush=True)
                 
                 feedback_parts = []

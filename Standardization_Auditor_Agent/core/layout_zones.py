@@ -13,10 +13,75 @@ def is_caption(text: str) -> bool:
 
 
 def is_formula_text(text: str) -> bool:
-    if re.search(r"[=∑∫√≈≠≤≥]", text):
+    # 1. Negative checks: Exclude common code patterns and text
+    stripped = text.strip()
+    
+    # Exclude C-style code endings or block starts
+    if re.search(r"[;{}]$", stripped):
+        return False
+        
+    # Exclude code keywords at start
+    if re.match(r"^\s*(def|class|import|return|if|else|elif|for|while|try|except|finally|public|private|protected|void|int|float|double|char|bool|var|let|const|function|switch|case)\b", text):
+        return False
+        
+    # Exclude comments
+    if re.search(r"(//|/\*|#\s)", text):
+        return False
+        
+    # Exclude snake_case variables (code style), but allow LaTeX like x_i, y_{max}
+    # Only ban if both sides are multi-letter: my_var, max_len
+    if re.search(r"\b[a-zA-Z]{2,}_[a-zA-Z]{2,}\b", text):
+        return False
+        
+    # Exclude list items / bullets
+    if re.match(r"^\s*(•|o|\*|-|\d+\.)\s", text):
+        return False
+        
+    # Exclude URL / Email
+    if re.search(r"(http[s]?://|@[\w.]+)", text):
+        return False
+
+    # Exclude lines with common text words (likely narrative text, not standalone formula)
+    # Be careful not to ban variables like 'sin', 'cos', 'max', 'min', 'log', 'ln'
+    # Common English stopwords: the, is, are, where, which, with, for, and, that, this, in, on, at, to, of, we, set, let, then, if, assume, given
+    stopwords = r"\b(the|is|are|where|which|with|and|that|this|in|on|at|to|of|we|set|let|then|if|assume|given|step|note|figure|table|data|value|width|height|size|parameter)\b"
+    if re.search(stopwords, text, re.IGNORECASE):
+        # Exception: "Let x = 1" -> Text. "where x is..." -> Text.
+        return False
+
+    # Exclude Key-Value pairs with simple numbers (e.g. "Width = 100")
+    # Matches "Word = Number [Unit]"
+    if re.match(r"^[A-Za-z\s]+=\s*\d+(\.\d+)?\s*[a-zA-Z%]*$", stripped):
+        return False
+
+    # 2. Positive checks: Formula indicators
+    # Greek letters, math operators (excluding standard keyboard ones like +, -, *, / which are ambiguous)
+    # ≤, ≥, ≠, ≈, ±, ×, ÷, ∑, ∫, √, α-ω, ∂, ∇, ∞
+    if re.search(r"[∑∫√≈≠≤≥±×÷α-ωΑ-Ω∂∇∞]", text):
         return True
-    if re.search(r"(（\d+）|\(\d+\))$", text):
+    
+    # Standard formula numbering at end
+    if re.search(r"(（\d+(?:[-.]\d+)*）|\(\d+(?:[-.]\d+)*\))$", text):
         return True
+        
+    # LaTeX syntax indicators
+    if re.search(r"(\\[a-zA-Z]+|\^|\{.*\})", text):
+        # \frac, \alpha, x^2, x_{i}
+        return True
+
+    # 3. Ambiguous symbols (=, <, >)
+    # Only treat as formula if not looking like code
+    if re.search(r"[=<>≈]", text):
+        # If it has logical operators (==, !=, <=, >=, &&, ||, ->, =>), it's likely code or logic text
+        if re.search(r"(==|!=|&&|\|\||->|=>)", text):
+            return False
+        
+        # Must contain some math-like structure?
+        # If it's just "x = 1", it's a formula (scalar assignment).
+        # But we filtered out "Let x = 1" and "Width = 100".
+        # So "x = 1" or "E = mc^2" should pass.
+        return True
+    
     return False
 
 
