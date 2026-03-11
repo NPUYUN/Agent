@@ -405,31 +405,48 @@ class PunctuationChecker:
                     continue
                 text_val = _element_get(e, "content")
                 pg = _element_get(e, "page_num") or "?"
+                region = _element_get(e, "region") or ""
                 
                 if text_val:
                     segment = str(text_val)
+                    if region == "chart":
+                        continue
+                    if re.search(r"http[s]?://|@[A-Za-z0-9_.-]+", segment):
+                        continue
+                    cjk_count = len(re.findall(r"[\u4e00-\u9fff]", segment))
+                    en_count = len(re.findall(r"[A-Za-z]", segment))
+                    num_count = len(re.findall(r"\d", segment))
+                    total_alpha = cjk_count + en_count + num_count
+                    cjk_ratio = cjk_count / total_alpha if total_alpha > 0 else 0.0
+                    en_ratio = en_count / total_alpha if total_alpha > 0 else 0.0
                     for m in cn_en_punct_pattern.finditer(segment):
+                        if cjk_ratio < 0.5:
+                            continue
                         issues.append({
                             "issue_type": "Punctuation_Mixed",
-                            "severity": "Warning",
+                            "severity": "Info",
                             "evidence": m.group(),
                             "page_num": pg,
                             "message": "中文文本使用了英文标点",
                         })
                     
                     for m in cn_en_dot_pattern.finditer(segment):
+                        if cjk_ratio < 0.5:
+                            continue
                         issues.append({
                             "issue_type": "Punctuation_Mixed",
-                            "severity": "Warning",
+                            "severity": "Info",
                             "evidence": m.group(),
                             "page_num": pg,
                             "message": "中文文本使用了英文标点(.)",
                         })
 
                     for m in en_cn_punct_pattern.finditer(segment):
+                        if en_ratio < 0.5:
+                            continue
                         issues.append({
                             "issue_type": "Punctuation_Mixed",
-                            "severity": "Warning",
+                            "severity": "Info",
                             "evidence": m.group(),
                             "page_num": pg,
                             "message": "英文文本使用了中文标点",
@@ -450,7 +467,7 @@ class PunctuationChecker:
                     for m in punct_cite_pattern.finditer(segment):
                         issues.append({
                             "issue_type": "Citation_Position_Inconsistent",
-                            "severity": "Warning",
+                            "severity": "Info",
                             "evidence": m.group(),
                             "page_num": pg,
                             "message": "引用标注位置错误 (应置于标点符号之前)",
@@ -539,10 +556,18 @@ class CitationChecker:
                 
                 if missing_nums:
                     pg = mapper.get_page_num(m.start()) if mapper else "?"
+                    ref_pages = set()
+                    for e in elements:
+                        if _is_likely_reference(e):
+                            p = _element_get(e, "page_num")
+                            if p is not None:
+                                ref_pages.add(p)
+                    if pg in ref_pages:
+                        continue
                     for missing in missing_nums:
                         issues.append({
                             "issue_type": "Citation_Reference_Missing",
-                            "severity": "Warning",
+                            "severity": "Info",
                             "evidence": f"[{missing}]",
                             "page_num": pg,
                             "message": "引用标注未在参考文献中找到对应编号",
@@ -571,10 +596,18 @@ class CitationChecker:
                 
                 if not matched:
                     pg = mapper.get_page_num(m.start()) if mapper else "?"
+                    ref_pages = set()
+                    for e in elements:
+                        if _is_likely_reference(e):
+                            p = _element_get(e, "page_num")
+                            if p is not None:
+                                ref_pages.add(p)
+                    if pg in ref_pages:
+                        continue
                     issues.append(
                         {
                             "issue_type": "Citation_Reference_Missing",
-                            "severity": "Warning",
+                            "severity": "Info",
                             "evidence": m.group(0),
                             "page_num": pg,
                             "message": "作者-年份引用未在参考文献中找到对应条目",

@@ -304,6 +304,13 @@ class VisualValidator:
                 if abs(nearest.bbox[1] - c.bbox[1]) > max_y * 0.33:
                     # Skip reporting if too far, assuming unrelated image
                     continue
+                
+                overlap = min(c.bbox[2], nearest.bbox[2]) - max(c.bbox[0], nearest.bbox[0])
+                c_w = max(0.0, c.bbox[2] - c.bbox[0])
+                i_w = max(0.0, nearest.bbox[2] - nearest.bbox[0])
+                min_w = min(c_w, i_w) if min(c_w, i_w) > 0 else 1.0
+                if overlap < min_w * 0.25:
+                    continue
 
                 # Check position (Bottom) with tolerance
                 # Tolerance allows for slight overlaps or bounding box inaccuracies
@@ -462,7 +469,7 @@ class VisualValidator:
                     }
                 )
                 continue
-            if len(curr_parts) == len(prev_parts) and curr_parts[:-1] == prev_parts[:-1]:
+            if len(curr_parts) == len(prev_parts) and curr_parts[:-1] == prev_parts[:-1] and curr.page_num == prev.page_num:
                 if curr_parts[-1] - prev_parts[-1] > 1:
                     issues.append(
                         {
