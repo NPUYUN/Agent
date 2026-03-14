@@ -1,6 +1,6 @@
 import subprocess
 import time
-import requests
+import httpx
 import sys
 import os
 import signal
@@ -24,14 +24,14 @@ def run_tests():
         
         # 1. Health Check
         print("Testing /health...")
-        resp = requests.get(f"{base_url}/health")
-        assert resp.status_code == 200
+        resp = httpx.get(f"{base_url}/health", timeout=10.0)
+        resp.raise_for_status()
         print("PASS")
         
         # 2. Rules Check
         print("Testing /rules...")
-        resp = requests.get(f"{base_url}/rules")
-        assert resp.status_code == 200
+        resp = httpx.get(f"{base_url}/rules", timeout=10.0)
+        resp.raise_for_status()
         rules = resp.json()
         assert "heading_check" in rules
         print(f"PASS (loaded rules: {list(rules.keys())})")
@@ -53,7 +53,7 @@ def run_tests():
                 "max_tokens": 500
             }
         }
-        resp = requests.post(f"{base_url}/audit", json=payload)
+        resp = httpx.post(f"{base_url}/audit", json=payload, timeout=60.0)
         if resp.status_code != 200:
             print(f"FAIL: {resp.status_code} {resp.text}")
         else:
@@ -70,16 +70,16 @@ def run_tests():
             else:
                 print("No issues found in minimal PDF (expected)")
 
-        # 4. Audit Check (without content - should fail 404 if not in DB)
-        print("Testing /audit without content (expecting 404 or DB error)...")
+        # 4. Audit Check (without content - should fail 400 by spec if not in DB)
+        print("Testing /audit without content (expecting 400 or DB error)...")
         payload_no_content = payload.copy()
         payload_no_content["payload"] = {"content": None} # or omit content if optional
         # Since pydantic field is Optional, we can send None
         
-        resp = requests.post(f"{base_url}/audit", json=payload_no_content)
+        resp = httpx.post(f"{base_url}/audit", json=payload_no_content, timeout=60.0)
         print(f"Response: {resp.status_code}")
-        if resp.status_code == 404:
-            print("PASS: Got 404 as expected (content not in DB)")
+        if resp.status_code == 400:
+            print("PASS: Got 400 as expected (missing content)")
         elif resp.status_code == 500:
             print("PASS: Got 500 (DB connection failed, expected in this env)")
         else:

@@ -7,7 +7,7 @@ from sqlalchemy import select
 # Add parent directory to sys.path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core.database import db_manager, ExpertComment
+from core.database import db_manager, AgentRule
 from core.rule_engine import RuleEngine
 
 async def seed_rules():
@@ -22,22 +22,18 @@ async def seed_rules():
         async for session in db_manager.get_session():
             for rule_id, rule_content in rules.items():
                 # Check if exists
-                stmt = select(ExpertComment).where(ExpertComment.rule_id == rule_id)
+                stmt = select(AgentRule).where(AgentRule.rule_id == rule_id)
                 result = await session.execute(stmt)
                 existing = result.scalar_one_or_none()
                 
                 if existing:
                     print(f"Rule {rule_id} already exists. Updating...")
-                    existing.rule_content = str(rule_content)
-                    existing.category = "formatting"
-                    # Vector generation skipped (requires embedding model)
+                    existing.content = yaml.safe_dump(rule_content, allow_unicode=True)
                 else:
                     print(f"Inserting rule {rule_id}...")
-                    new_rule = ExpertComment(
+                    new_rule = AgentRule(
                         rule_id=rule_id,
-                        category="formatting",
-                        rule_content=str(rule_content),
-                        # vector=None # Nullable
+                        content=yaml.safe_dump(rule_content, allow_unicode=True),
                     )
                     session.add(new_rule)
             

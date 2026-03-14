@@ -1,6 +1,6 @@
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, declarative_base
-from sqlalchemy import Column, String, Integer, Text, TIMESTAMP, BigInteger, Enum as SAEnum, Float, ARRAY
+from sqlalchemy import Column, String, Integer, Text, TIMESTAMP, BigInteger, Enum as SAEnum, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from typing import AsyncGenerator
 import enum
@@ -8,11 +8,7 @@ from datetime import datetime
 from config import DATABASE_URL
 import uuid
 
-# Try to import Vector from pgvector.sqlalchemy, fallback if not installed
-try:
-    from pgvector.sqlalchemy import Vector
-except ImportError:
-    Vector = None
+from pgvector.sqlalchemy import Vector
 
 Base = declarative_base()
 
@@ -29,6 +25,7 @@ class PaperSection(Base):
     用于存储解析后的论文内容
     """
     __tablename__ = "paper_sections"
+    __table_args__ = (UniqueConstraint("paper_id", "chunk_id", name="uq_paper_sections_paper_chunk"),)
     
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     paper_id = Column(UUID(as_uuid=True), index=True, nullable=False, comment="论文ID")
@@ -46,18 +43,21 @@ class ExpertComment(Base):
     """
     __tablename__ = "expert_comments"
     
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
-    rule_id = Column(String, index=True, comment="规则ID")
-    category = Column(String, index=True, comment="分类: formatting/statistics/etc")
-    rule_content = Column(Text, nullable=False, comment="规则文本")
-    
-    # Use Vector if available, otherwise fallback to ARRAY(Float) or JSONB
-    if Vector:
-        vector = Column(Vector(1536), comment="规则向量")
-    else:
-        vector = Column(ARRAY(Float), comment="规则向量 (Fallback)")
+    comment_id = Column(String, primary_key=True, comment="评语唯一ID")
+    metric_id = Column(String, index=True, nullable=False, comment="关联指标/规则ID")
+    text = Column(Text, nullable=False, comment="专家原始评语内容")
+    embedding = Column(Vector(768), nullable=True, comment="向量(768)")
         
     created_at = Column(TIMESTAMP, default=datetime.utcnow)
+
+class AgentRule(Base):
+    __tablename__ = "agent_rules"
+    __table_args__ = (UniqueConstraint("rule_id", name="uq_agent_rules_rule_id"),)
+    
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    rule_id = Column(String, index=True, nullable=False, comment="规则ID")
+    content = Column(Text, nullable=False, comment="规则内容(YAML/JSON字符串)")
+    updated_at = Column(TIMESTAMP, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 class ReviewTask(Base):
     """

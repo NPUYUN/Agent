@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, field_validator, UUID4
+from pydantic import BaseModel, Field, field_validator, UUID4, ConfigDict
 from typing import Optional, List, Dict, Any
 from enum import Enum
 from config import ALLOWED_TAGS, AGENT_NAME, AGENT_VERSION
@@ -32,26 +32,24 @@ class AuditRequest(BaseModel):
     payload: RequestPayload
     config: RequestConfig
 
-    class Config:
-        json_schema_extra = {
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "request_id": "req_20231027_001",
                 "metadata": {
                     "paper_id": "123e4567-e89b-12d3-a456-426614174000",
                     "paper_title": "论文标题",
-                    "chunk_id": "chunk_seq_005"
+                    "chunk_id": "chunk_seq_005",
                 },
                 "payload": {
                     "content": "论文切片内容...",
                     "context_before": "前文...",
-                    "context_after": "后文..."
+                    "context_after": "后文...",
                 },
-                "config": {
-                    "temperature": 0.1,
-                    "max_tokens": 500
-                }
+                "config": {"temperature": 0.1, "max_tokens": 500},
             }
         }
+    )
 
 class AgentInfo(BaseModel):
     name: str = Field(AGENT_NAME, description="Agent名称")
@@ -63,13 +61,40 @@ class IssueDetail(BaseModel):
     """
     issue_type: str = Field(..., description="问题类型")
     severity: str = Field(..., description="严重程度")
-    page_num: int = Field(..., description="页码")
-    bbox: List[float] = Field(..., description="边界框 [x0, y0, x1, y1]")
+    page_num: int = Field(0, description="页码", ge=0)
+    bbox: List[float] = Field(default_factory=lambda: [0.0, 0.0, 0.0, 0.0], description="边界框 [x0, y0, x1, y1]")
     evidence: Optional[str] = Field(None, description="原文证据/特征字符")
     message: Optional[str] = Field(None, description="错误描述")
     location: Optional[Dict[str, Any]] = Field(None, description="详细定位信息 (page, bbox)")
     anchor_id: Optional[str] = Field(None, description="锚点ID")
     highlight: Optional[List[float]] = Field(None, description="高亮区域")
+
+    @field_validator("page_num", mode="before")
+    def normalize_page_num(cls, v):
+        if v is None:
+            return 0
+        if isinstance(v, int):
+            return v if v >= 0 else 0
+        if isinstance(v, str):
+            v = v.strip()
+            return int(v) if v.isdigit() else 0
+        return 0
+
+    @field_validator("bbox", mode="before")
+    def normalize_bbox(cls, v):
+        if v is None:
+            return [0.0, 0.0, 0.0, 0.0]
+        if not isinstance(v, list):
+            return [0.0, 0.0, 0.0, 0.0]
+        try:
+            floats = [float(x) for x in v]
+        except Exception:
+            return [0.0, 0.0, 0.0, 0.0]
+        if len(floats) < 4:
+            floats = floats + [0.0] * (4 - len(floats))
+        if len(floats) > 4:
+            floats = floats[:4]
+        return floats
 
 class AuditResult(BaseModel):
     score: int = Field(..., ge=0, le=100, description="评分")
@@ -102,24 +127,19 @@ class AuditResponse(BaseModel):
     result: AuditResult
     usage: ResourceUsage
 
-    class Config:
-        json_schema_extra = {
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "request_id": "req_20231027_001",
-                "agent_info": {
-                    "name": "Standardization_Auditor_Agent",
-                    "version": "v1.1"
-                },
+                "agent_info": {"name": "Standardization_Auditor_Agent", "version": "v1.1"},
                 "result": {
                     "score": 85,
                     "audit_level": "Warning",
                     "comment": "发现 3 个格式问题。",
                     "suggestion": "建议修正图表标号及错别字。",
-                    "tags": ["Citation_Inconsistency", "Label_Missing"]
+                    "tags": ["Citation_Inconsistency", "Label_Missing"],
                 },
-                "usage": {
-                    "tokens": 120,
-                    "latency_ms": 1500
-                }
+                "usage": {"tokens": 120, "latency_ms": 1500},
             }
         }
+    )

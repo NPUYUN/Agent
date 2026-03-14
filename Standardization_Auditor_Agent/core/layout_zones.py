@@ -3,18 +3,48 @@ import re
 
 
 def is_reference_title(text: str) -> bool:
-    t = text.strip().replace(" ", "")
-    return t in {"参考文献", "参考文献：", "Reference", "References"}
+    t = re.sub(r"\s+", "", (text or "").strip())
+    t = t.rstrip("：:")
+    return t in {"参考文献", "Reference", "References"}
 
 
 def is_caption(text: str) -> bool:
-    # Use re.IGNORECASE to support both "Table" and "table"
-    return re.match(r"^(图|表|Figure|Fig\.|Table)\s*\d+", text, re.IGNORECASE) is not None
+    t = (text or "").strip()
+    if not t:
+        return False
+    if re.search(r"[\.·…]{5,}\s*\d+\s*$", t):
+        return False
+    if re.search(r"\s{5,}\d+\s*$", t):
+        return False
+    # Relaxed rule: Allow standalone caption numbers (e.g. "图 2.2")
+    # if re.fullmatch(r"(图|表|Figure|Fig\.|Table)\s*\d+(?:[.-]\d+)*\.?", t, re.IGNORECASE):
+    #     return False
+    m = re.match(r"^(图|表|Figure|Fig\.|Table)\s*\d+(?:[.-]\d+)*", t, re.IGNORECASE)
+    if not m:
+        return False
+    rest = t[m.end():].strip()
+    # Relaxed rule: Allow standalone caption numbers
+    # if not rest:
+    #     return False
+    if re.search(r"[。！？]", t):
+        return False
+    if re.match(r"^(中|的)", rest):
+        return False
+    if re.search(r"(展示|所示|如图|见图|如表|见表)", t):
+        if len(t) >= 20:
+            return False
+    if re.match(r"^(shows?|illustrates?)\\b", rest, re.IGNORECASE):
+        return False
+    return True
 
 
 def is_formula_text(text: str) -> bool:
     # 1. Negative checks: Exclude common code patterns and text
     stripped = text.strip()
+    if len(stripped) > 160:
+        return False
+    if re.search(r"[\.·…]{5,}\s*\d+\s*$", stripped):
+        return False
     
     # Exclude C-style code endings or block starts
     if re.search(r"[;{}]$", stripped):
@@ -32,9 +62,19 @@ def is_formula_text(text: str) -> bool:
     # Only ban if both sides are multi-letter: my_var, max_len
     if re.search(r"\b[a-zA-Z]{2,}_[a-zA-Z]{2,}\b", text):
         return False
+
+    if re.search(r"\b\w+\s*=\s*\w+\s*\(", stripped) and re.search(r"\w+\[[^\]]+\]", stripped):
+        return False
+    if re.search(r"\w+\[[^\]]+\]", stripped) and re.search(r"(?:==|!=|:=)", stripped):
+        return False
+    if "grid[" in stripped or "grid [" in stripped:
+        return False
         
     # Exclude list items / bullets
     if re.match(r"^\s*(•|o|\*|-|\d+\.)\s", text):
+        return False
+
+    if ":=" in stripped and re.search(r"[A-Za-z]", stripped) and not re.search(r"[∑∫√≈≠≤≥±×÷α-ωΑ-Ω∂∇∞]", stripped):
         return False
         
     # Exclude URL / Email
@@ -58,10 +98,15 @@ def is_formula_text(text: str) -> bool:
     # Greek letters, math operators (excluding standard keyboard ones like +, -, *, / which are ambiguous)
     # ≤, ≥, ≠, ≈, ±, ×, ÷, ∑, ∫, √, α-ω, ∂, ∇, ∞
     if re.search(r"[∑∫√≈≠≤≥±×÷α-ωΑ-Ω∂∇∞]", text):
+        cn = len(re.findall(r"[\u4e00-\u9fff]", text))
+        if cn / max(len(stripped), 1) > 0.2 and not re.search(r"[=<>≤≥±×÷*/+\-≈≠]", text):
+            return False
         return True
     
     # Standard formula numbering at end
-    if re.search(r"(（\d+(?:[-.]\d+)*）|\(\d+(?:[-.]\d+)*\))$", text):
+    if re.fullmatch(r"(（\d+(?:[-.]\d+)*）|\(\d+(?:[-.]\d+)*\))", stripped):
+        return False
+    if re.search(r"(（\d+(?:[-.]\d+)*）|\(\d+(?:[-.]\d+)*\))$", stripped):
         return True
         
     # LaTeX syntax indicators
@@ -75,20 +120,35 @@ def is_formula_text(text: str) -> bool:
         # If it has logical operators (==, !=, <=, >=, &&, ||, ->, =>), it's likely code or logic text
         if re.search(r"(==|!=|&&|\|\||->|=>)", text):
             return False
-        
-        # Must contain some math-like structure?
-        # If it's just "x = 1", it's a formula (scalar assignment).
-        # But we filtered out "Let x = 1" and "Width = 100".
-        # So "x = 1" or "E = mc^2" should pass.
+        if re.search(r"\w+\[[^\]]+\]", stripped) and re.search(r"\w+\s*=", stripped):
+            return False
+        cn = len(re.findall(r"[\u4e00-\u9fff]", text))
+        if cn / max(len(stripped), 1) > 0.2:
+            return False
+        if len(stripped) > 120:
+            return False
+        if not re.search(r"[\dA-Za-zα-ωΑ-Ω]", text):
+            return False
         return True
     
     return False
 
 
 def is_heading_text(text: str) -> bool:
-    if re.match(r"^(\d+(?:\.\d+)*)[.\s、]", text):
+    t = text.strip()
+    if not t:
+        return False
+    if re.match(r"^\d{2,4}\s*年(\s*\d{1,2}\s*月)?(\s*\d{1,2}\s*日)?", t):
+        return False
+    m = re.match(r"^(\d+(?:\.\d+)*)(?:[.、]|\s+)(.+)$", t)
+    if m:
+        rest = (m.group(2) or "").strip()
+        if len(rest) < 2:
+            return False
+        if re.match(r"^(年|月|日)$", rest):
+            return False
         return True
-    if re.match(r"^第[一二三四五六七八九十百]+[章节]", text):
+    if re.match(r"^第[一二三四五六七八九十百]+[章节]", t):
         return True
     return False
 

@@ -4,14 +4,15 @@ import asyncpg
 import sys
 import os
 import re
+import time
 
 # Add parent directory to sys.path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from sqlalchemy.ext.asyncio import create_async_engine
-from sqlalchemy import inspect
+from sqlalchemy import inspect, text
 from config import DATABASE_URL
-from core.database import Base, Vector
+from core.database import Base
 
 # Parse connection details from config URL
 # Format: postgresql+asyncpg://user:password@host:port/dbname
@@ -52,26 +53,23 @@ async def ensure_database_exists():
         else:
             print(f"✅ Database '{DB_NAME}' already exists.")
 
-        # Reconnect to the new database to install extensions
-        if Vector:
-            print(f"Installing extensions in '{DB_NAME}' (Vector support enabled)...")
-            db_conn = await asyncpg.connect(
-                user=DB_USER,
-                password=DB_PASS,
-                database=DB_NAME,
-                host=DB_HOST,
-                port=DB_PORT
-            )
-            try:
-                await db_conn.execute('CREATE EXTENSION IF NOT EXISTS vector;')
-                print("✅ Extension 'vector' installed/verified.")
-            except Exception as e:
-                print(f"⚠️ Failed to install 'vector' extension on DB server: {e}")
-                print("⚠️ Proceeding without DB-side vector support.")
-            finally:
-                await db_conn.close()
-        else:
-            print("ℹ️ Vector support not available (pgvector not installed). Skipping extension installation.")
+        print(f"Installing extensions in '{DB_NAME}' (Vector support required)...")
+        db_conn = await asyncpg.connect(
+            user=DB_USER,
+            password=DB_PASS,
+            database=DB_NAME,
+            host=DB_HOST,
+            port=DB_PORT
+        )
+        try:
+            await db_conn.execute('CREATE EXTENSION IF NOT EXISTS vector;')
+            print("✅ Extension 'vector' installed/verified.")
+        except Exception as e:
+            print(f"❌ Failed to install 'vector' extension on DB server: {e}")
+            print("HINT: Install pgvector on the PostgreSQL server (or use the pgvector docker image).")
+            return False
+        finally:
+            await db_conn.close()
             
     except Exception as e:
         print(f"❌ Error checking/creating database: {e}")
@@ -89,31 +87,69 @@ async def ensure_tables_exist():
     
     try:
         async with engine.begin() as conn:
-            # Check if 'review_tasks' table exists
-            def check_table(connection):
+            def get_tables(connection):
                 inspector = inspect(connection)
-                return inspector.has_table("review_tasks")
-            
-            table_exists = await conn.run_sync(check_table)
-            
-            if not table_exists:
-                print("Table 'review_tasks' missing. Creating schema...")
+                return set(inspector.get_table_names())
+
+            existing_tables = await conn.run_sync(get_tables)
+            required_tables = {"review_tasks", "expert_comments", "paper_sections", "agent_rules"}
+            missing_tables = required_tables - existing_tables
+
+            if "expert_comments" in existing_tables:
+                def get_expert_comment_columns(connection):
+                    inspector = inspect(connection)
+                    return {c["name"] for c in inspector.get_columns("expert_comments")}
+
+                columns = await conn.run_sync(get_expert_comment_columns)
+                expected = {"comment_id", "metric_id", "text", "embedding"}
+                if not expected.issubset(columns):
+                    legacy_name = f"expert_comments_legacy_{int(time.time())}"
+                    print(f"⚠️ Detected legacy expert_comments schema. Renaming to '{legacy_name}' and recreating...")
+                    await conn.execute(text(f'ALTER TABLE expert_comments RENAME TO "{legacy_name}"'))
+                    existing_tables.remove("expert_comments")
+                    missing_tables.add("expert_comments")
+
+            if "agent_rules" in existing_tables:
+                def get_agent_rules_columns(connection):
+                    inspector = inspect(connection)
+                    return {c["name"] for c in inspector.get_columns("agent_rules")}
+
+                columns = await conn.run_sync(get_agent_rules_columns)
+                expected = {"id", "rule_id", "content", "updated_at"}
+                if not expected.issubset(columns):
+                    legacy_name = f"agent_rules_legacy_{int(time.time())}"
+                    print(f"⚠️ Detected legacy agent_rules schema. Renaming to '{legacy_name}' and recreating...")
+                    await conn.execute(text(f'ALTER TABLE agent_rules RENAME TO \"{legacy_name}\"'))
+                    existing_tables.remove("agent_rules")
+                    missing_tables.add("agent_rules")
+
+            if missing_tables:
+                print(f"⚠️ Missing tables detected: {sorted(missing_tables)}. Creating missing schema...")
                 await conn.run_sync(Base.metadata.create_all)
-                print("✅ Tables created successfully.")
+                print("✅ Tables created/verified successfully.")
             else:
-                print("✅ Table 'review_tasks' exists.")
-                
-                # Check required columns
+                print("✅ Required tables exist.")
+
+            await conn.execute(
+                text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_paper_sections_paper_chunk ON paper_sections (paper_id, chunk_id)"
+                )
+            )
+            await conn.execute(
+                text("CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_rules_rule_id ON agent_rules (rule_id)")
+            )
+
+            if "review_tasks" in existing_tables:
                 def check_columns(connection):
                     inspector = inspect(connection)
                     return [c['name'] for c in inspector.get_columns("review_tasks")]
                 
                 columns = await conn.run_sync(check_columns)
                 required_cols = ['task_id', 'paper_id', 'status', 'result_json']
-                missing = [col for col in required_cols if col not in columns]
+                missing_cols = [col for col in required_cols if col not in columns]
                 
-                if missing:
-                    print(f"⚠️ Warning: Table exists but might be missing columns: {missing}")
+                if missing_cols:
+                    print(f"⚠️ Warning: Table exists but might be missing columns: {missing_cols}")
                 else:
                     print("✅ Table structure verification passed.")
 

@@ -25,9 +25,7 @@ Standardization_Auditor_Agent/
 │   └── llm_client.py           # 统一 LLM 客户端 (支持 Gemini/Qwen)
 ├── utils/                      # 通用工具库
 │   └── logger.py               # 标准化日志模块
-├── tests/                      # 测试用例
-│   ├── test_api.py             # API 接口测试
-│   └── test_layout_rules.py    # 布局规则单元测试
+├── tests/                      # 测试用例（如目录为空，优先使用 scripts/ 下的集成验证脚本）
 ├── scripts/                    # 运维脚本
 │   ├── verify_deployment.py    # 部署验证脚本 (端到端)
 │   └── seed_rules.py           # 规则库入库脚本
@@ -36,9 +34,10 @@ Standardization_Auditor_Agent/
 ├── models.py                   # Pydantic 数据模型 (严格遵循 API 协议)
 ├── main.py                     # FastAPI 应用入口 (含生命周期与DB写入)
 ├── requirements.txt            # 项目依赖 (精准版本)
-├── 测试说明.md                  # 测试操作指南 (新增)
 └── Dockerfile                  # 容器化构建文件
 ```
+
+测试操作指南见项目根目录的 `测试说明.md`。
 
 ## 核心任务与分工 (基于分工明细)
 
@@ -62,7 +61,7 @@ Standardization_Auditor_Agent/
 ### 3. 数据测试/标注 (Data Support) - 1人
 - **样本库搭建**: 收集≥200份样本（规范/单一问题/混合问题），覆盖图表/公式/标题/错别字/术语/标点/引用等维度，并按问题类型分类管理。
 - **标注规范与数据集**: 制定标准化格式问题标注手册，约定“问题类型/页码/坐标/证据文本/风险等级/修正建议”的记录方式，并将标注结果沉淀为可直接加载的测试数据集（Excel + JSON）。
-- **测试用例与回归**: 设计并维护针对 CV/布局与语义判定模块的单元测试、集成测试、场景化测试用例，优先通过 `tests/` 目录下的 `pytest` 用例（如 `tests/test_api.py`）与端到端脚本（`audit_client.py`）完成回归测试，确保不同版本之间结果可比对、可追溯。
+- **测试用例与回归**: 设计并维护针对 CV/布局与语义判定模块的单元测试、集成测试、场景化测试用例，优先通过 `tests/` 目录下的单元测试（`python -m unittest discover -s tests`）与端到端脚本（`audit_client.py`）完成回归测试，确保不同版本之间结果可比对、可追溯。
 - **一致性核查**: 对接 Orchestrator 与前端，核查审计结果 JSON 的完整性（是否符合开发规范中的 API 协议）与数据库写入字段的完整性，确保 JSON 结构、数据库字段、前端展示三者一致；同时检查锚点定位与导师复核流程是否正常。
 
 ## 核心交互流程
@@ -141,6 +140,12 @@ python main.py --pdf "path/to/your/paper.pdf"
 - `*_score_report.md`: 评分报告（总分、评级、各类问题统计）。
 - `*_deduction_details.md`: 扣分细则（包含 CV 视觉布局分析 和 LLM 语义内容分析的详细问题列表）。
 
+#### LLM 分块策略（语义审计）
+
+当启用 LLM 语义扫描时，会按段落进行分块，默认分块上限 15000 字符、重叠 500 字符。分块策略保证：
+- 段落不会被拆分到两个分块中（除非单段落本身超过上限）。
+- 超长段落会单独分块，并在段落内部按句子/分隔符切分，避免产生过小分块。
+
 #### 方式二：启动 API 服务
 
 ```bash
@@ -152,14 +157,19 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000
 
 详细测试步骤请参考 [测试说明文档](测试说明.md)。
 
-- **单元/接口测试 (pytest)**  
+- **单元测试 (unittest)**  
   在 `Standardization_Auditor_Agent` 目录下运行：
   ```bash
-  pytest
+  python -m unittest discover -s tests
   ```
-  当前主要覆盖：
-  - `/health` 接口可用性与返回结构；
-  - `/audit` 的合法请求与非法请求（缺少字段）行为，验证参数校验与 400 状态码返回。
+  若 `tests/` 目录为空或未包含可运行用例，建议优先使用集成验证脚本完成回归验证（见下条）。
+
+- **集成/部署验证（推荐）**  
+  在 `Standardization_Auditor_Agent` 目录下运行：
+  ```bash
+  python scripts/verify_deployment.py
+  ```
+  该脚本会启动服务并完成 `/health`、`/rules`、`/audit` 的端到端验证。
 
 - **端到端示例（PDF → 审计结果）**  
   在 `Standardization_Auditor_Agent` 目录下运行：
@@ -185,7 +195,7 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000
     "chunk_id": "chunk_seq_005"
   },
   "payload": {
-    "content": "论文切片内容...",
+    "content": "Base64 PDF 或 Markdown 文本...",
     "context_before": "前文...",
     "context_after": "后文..."
   },

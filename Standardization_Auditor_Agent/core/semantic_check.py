@@ -6,6 +6,62 @@ import re
 import json
 from config import LLM_TIMEOUT_SEC
 from .llm_client import LLMClient
+from sqlalchemy import select
+from .database import db_manager, ExpertComment
+from utils.logger import setup_logger
+
+logger = setup_logger(__name__)
+
+_sbert_model = None
+
+
+def _get_sbert_model():
+    global _sbert_model
+    if _sbert_model is None:
+        try:
+            from sentence_transformers import SentenceTransformer
+            from config import SBERT_MODEL_NAME, SBERT_DEVICE
+
+            device = SBERT_DEVICE or None
+            _sbert_model = SentenceTransformer(SBERT_MODEL_NAME, device=device)
+        except Exception as e:
+            logger.warning(f"SBERT model unavailable, will use fallback embedding: {e}")
+            _sbert_model = None
+    return _sbert_model
+
+
+def _embed_text_fallback(text: str) -> List[float]:
+    import hashlib
+    import numpy as np
+
+    vec = np.zeros(768, dtype=np.float32)
+    tokens = re.findall(r"[\u4e00-\u9fff]+|[a-zA-Z0-9_]+", (text or "").lower())
+    if not tokens:
+        return vec.astype(float).tolist()
+
+    for token in tokens:
+        h = hashlib.blake2b(token.encode("utf-8"), digest_size=8).digest()
+        idx = int.from_bytes(h[:4], "little", signed=False) % 768
+        sign = 1.0 if (h[4] & 1) == 0 else -1.0
+        vec[idx] += sign
+
+    norm = float(np.linalg.norm(vec))
+    if norm > 0:
+        vec /= norm
+    return vec.astype(float).tolist()
+
+
+def _embed_text_sbert(text: str) -> List[float]:
+    model = _get_sbert_model()
+    if model is None:
+        return _embed_text_fallback(text)
+
+    vec = model.encode(text, normalize_embeddings=True)
+    vec_list = vec.tolist() if hasattr(vec, "tolist") else list(vec)
+    if len(vec_list) != 768:
+        logger.warning(f"SBERT embedding dim mismatch: expected 768, got {len(vec_list)}. Using fallback embedding.")
+        return _embed_text_fallback(text)
+    return vec_list
 
 
 def _element_get(element: Any, key: str) -> Any:
@@ -113,7 +169,13 @@ def _extract_reference_numbers(reference_texts: List[str]) -> List[str]:
 
 
 def _extract_numeric_citations(content: str) -> List[str]:
-    return re.findall(r"\[(\d+(?:\s*,\s*\d+)*)\]", content)
+    results: List[str] = []
+    for m in re.finditer(r"(?<![\w\]])\[(\d+(?:\s*,\s*\d+)*)\]", content or ""):
+        nums = [n for n in re.findall(r"\d+", m.group(1) or "") if n and n != "0"]
+        if not nums:
+            continue
+        results.append(m.group(1))
+    return results
 
 
 def _extract_author_year_citations(content: str) -> List[str]:
@@ -226,14 +288,19 @@ class TypoChecker:
             # 这其实由 TerminologyChecker 处理。
             # TypoChecker 处理的是拼写错误，如 "TensorFlow" 写成 "TensorFlwo"
             
-            # 这里使用 difflib 查找相似词
-            # 为了性能，只对长度相近的词进行比较
-            candidates = [w for w in words if abs(len(w) - len(keyword)) <= 2]
+            is_english = bool(re.search(r"[A-Za-z]", keyword))
+            if is_english:
+                candidates = [w for w in words if abs(len(w) - len(keyword)) <= 2]
+            else:
+                candidates = [w for w in words if len(w) == len(keyword)]
             # 提高匹配阈值，避免将 "神经网络" 误判为 "卷积神经网络" 的错别字
             matches = difflib.get_close_matches(keyword, candidates, n=3, cutoff=0.85)
             
             for match in matches:
                 if match != keyword:
+                    if not is_english:
+                        if keyword.startswith(match) or keyword.endswith(match) or match in keyword or keyword in match:
+                            continue
                     # 排除掉仅仅是大小写不同的情况 (交给 TerminologyChecker)
                     if match.lower() == keyword.lower():
                         continue
@@ -398,7 +465,7 @@ class PunctuationChecker:
             # 1b. Check for '.' specifically, avoiding TOC leaders
             cn_en_dot_pattern = re.compile(r"[\u4e00-\u9fff]\s*\.(?!\s*[\.\d])")
             # 1c. English text using Chinese punctuation
-            en_cn_punct_pattern = re.compile(r"[a-zA-Z]\s*[，。？！；：]")
+            en_cn_punct_pattern = re.compile(r"[a-zA-Z]{2,}\s*[，。？！；：]")
             
             for e in elements:
                 if _is_likely_reference(e):
@@ -409,7 +476,7 @@ class PunctuationChecker:
                 
                 if text_val:
                     segment = str(text_val)
-                    if region == "chart":
+                    if region in {"chart", "formula"}:
                         continue
                     if re.search(r"http[s]?://|@[A-Za-z0-9_.-]+", segment):
                         continue
@@ -442,8 +509,30 @@ class PunctuationChecker:
                         })
 
                     for m in en_cn_punct_pattern.finditer(segment):
-                        if en_ratio < 0.5:
+                        if en_ratio < 0.8 or en_count < 5:
                             continue
+                        
+                        # Skip if single word (no spaces) - likely a term in a list
+                        # e.g. "Transformer，"
+                        if " " not in m.group():
+                             # Check if the matched part (word+punct) has spaces? 
+                             # m.group() includes punctuation. "Transformer，" has no space.
+                             # But "Large Language Model，" has spaces.
+                             if " " not in segment[max(0, m.start()-20):m.end()]: # Heuristic: look back
+                                 # Or just check the whole segment if it's short?
+                                 if len(segment) < 50 and " " not in segment:
+                                     continue
+
+                        # Check if inside Chinese parentheses (e.g. "（Large Language Model，LLM）")
+                        match_start = m.start()
+                        pre_text = segment[:match_start]
+                        post_text = segment[m.end():]
+                        if "（" in pre_text and "）" in post_text:
+                            last_open = pre_text.rfind("（")
+                            next_close = post_text.find("）")
+                            if "）" not in pre_text[last_open:] and "（" not in post_text[:next_close]:
+                                continue
+
                         issues.append({
                             "issue_type": "Punctuation_Mixed",
                             "severity": "Info",
@@ -549,9 +638,11 @@ class CitationChecker:
             
         if numeric_citations:
             # Re-scan to find locations
-            for m in re.finditer(r"\[(\d+(?:\s*,\s*\d+)*)\]", text):
+            for m in re.finditer(r"(?<![\w\]])\[(\d+(?:\s*,\s*\d+)*)\]", text):
                 citation_text = m.group(0)
-                nums_in_cite = re.findall(r"\d+", citation_text)
+                nums_in_cite = [n for n in re.findall(r"\d+", citation_text) if n and n != "0"]
+                if not nums_in_cite:
+                    continue
                 missing_nums = [n for n in nums_in_cite if n not in ref_nums]
                 
                 if missing_nums:
@@ -649,6 +740,216 @@ class SemanticChecker:
         self.punct_checker = PunctuationChecker(self.punct_checker.config)
         self.cite_checker = CitationChecker(self.cite_checker.config)
 
+    async def _extract_facts_llm(self, text: str) -> str:
+        if self.llm_client.provider == "none":
+            return ""
+        content = (text or "").strip()
+        if not content:
+            return ""
+        user_prompt = content[:12000]
+        system_prompt = (
+            "你是论文格式审计助手。请从用户提供的论文片段中提取可核查的客观事实点，"
+            "用于后续与专家评语进行语义匹配。输出要求：1) 中文；2) 条目化；3) 每条不超过30字；"
+            "4) 只输出事实点，不要解释。"
+        )
+        try:
+            return (await self.llm_client.generate_text(system_prompt, user_prompt, temperature=0.1, max_tokens=800)).strip()
+        except Exception as e:
+            logger.warning(f"facts extraction failed: {e}")
+            return ""
+
+    async def _retrieve_expert_comments(self, query_vector: List[float], top_k: int = 5) -> List[str]:
+        if not query_vector:
+            return []
+        try:
+            async for session in db_manager.get_session():
+                distance = ExpertComment.embedding.op("<=>")(query_vector)
+                stmt = (
+                    select(ExpertComment.text)
+                    .where(ExpertComment.embedding.is_not(None))
+                    .order_by(distance.asc())
+                    .limit(top_k)
+                )
+                result = await session.execute(stmt)
+                return [row[0] for row in result.all() if row and row[0]]
+        except Exception as e:
+            logger.warning(f"expert comment retrieval failed: {e}")
+            return []
+
+    async def generate_expert_commentary(
+        self, content: str, issues: List[Dict[str, Any]], top_k: int = 5
+    ) -> Tuple[Optional[str], Optional[str]]:
+        if self.llm_client.provider == "none":
+            return None, None
+        llm_cfg = self.rules.get("rag_eval", {}) if isinstance(self.rules, dict) else {}
+        enabled = bool(llm_cfg.get("enabled", True))
+        if not enabled:
+            return None, None
+
+        facts = await self._extract_facts_llm(content)
+        if not facts:
+            return None, None
+
+        try:
+            query_vector = _embed_text_sbert(facts)
+        except Exception as e:
+            logger.warning(f"facts embedding failed: {e}")
+            return None, None
+
+        expert_texts = await self._retrieve_expert_comments(query_vector, top_k=top_k)
+
+        issue_counts: Dict[str, int] = {}
+        for it in issues or []:
+            if isinstance(it, dict):
+                t = it.get("issue_type") or "Unknown"
+            else:
+                t = getattr(it, "issue_type", "Unknown")
+            issue_counts[t] = issue_counts.get(t, 0) + 1
+        issue_summary = "\n".join([f"- {k}: {v}" for k, v in sorted(issue_counts.items(), key=lambda x: (-x[1], x[0]))]) or "-"
+
+        expert_block = "\n".join([f"- {t}" for t in expert_texts]) or "-"
+
+        system_prompt = (
+            "你是论文标准化审计专家。请基于用户提供的事实点、问题概览，以及检索到的专家评语，"
+            "输出两段中文内容：comment 和 suggestion。必须以JSON对象输出，键为 comment 和 suggestion，"
+            "不要输出多余文本。comment 用于概述问题与严重性，suggestion 给出可执行修改建议。"
+        )
+        user_prompt = json.dumps(
+            {
+                "facts": facts,
+                "issue_summary": issue_summary,
+                "expert_comments": expert_block,
+            },
+            ensure_ascii=False,
+        )
+        try:
+            raw = (await self.llm_client.generate_text(system_prompt, user_prompt, temperature=0.2, max_tokens=800)).strip()
+            data = json.loads(raw)
+            comment = str(data.get("comment") or "").strip()
+            suggestion = str(data.get("suggestion") or "").strip()
+            if comment and suggestion:
+                return comment, suggestion
+        except Exception as e:
+            logger.warning(f"commentary generation failed: {e}")
+        return None, None
+
+    def _split_long_paragraph(self, para: str, chunk_size: int, overlap: int) -> List[str]:
+        parts: List[str] = []
+        if not para or chunk_size <= 0:
+            return parts
+
+        s = 0
+        min_chunk_size = min(2000, chunk_size // 5)  # Soft lower limit to avoid tiny chunks
+
+        while s < len(para):
+            # 1. Determine maximum possible reach
+            target = min(s + chunk_size, len(para))
+            
+            # If we reached the end, just take it
+            if target >= len(para):
+                parts.append(para[s:target])
+                break
+
+            # 2. Find the best cut point using weighted scoring
+            # Goal: Find a cut point close to target, prioritizing sentence completeness.
+            # Strategy: Search backwards from target (+lookahead) to s + min_chunk_size.
+            # Score = (Distance from s) + Priority_Bonus
+            
+            strong_punct = {".", "!", "?", "。", "！", "？"}
+            weak_punct = {";", ":", "；", "："}
+            clause_punct = {",", "，", "、"}
+            
+            lookahead_limit = min(len(para), target + 100)
+            
+            # Helper to find last occurrence in range [start, end)
+            def find_last_in_range(start_idx, end_idx, chars):
+                for i in range(end_idx - 1, start_idx - 1, -1):
+                    if para[i] in chars:
+                        return i + 1 # Include the delimiter
+                return -1
+
+            # Search range: [s + min_chunk_size, lookahead_limit]
+            search_start = min(s + min_chunk_size, target) 
+            search_end = lookahead_limit
+            
+            candidates = []
+            
+            # Priority 1: Strong Punctuation (Period)
+            # Bonus: 10000. Prefers Period at 5000 (Score 15000) over Semicolon at 5000 (Score 9000).
+            # But Semicolon at 14000 (Score 18000) beats Period at 5000.
+            c_strong = find_last_in_range(search_start, search_end, strong_punct)
+            if c_strong != -1:
+                candidates.append((c_strong, 10000))
+                
+            # Priority 2: Weak Punctuation (Semicolon)
+            # Bonus: 4000.
+            c_weak = find_last_in_range(search_start, search_end, weak_punct)
+            if c_weak != -1:
+                candidates.append((c_weak, 4000))
+                
+            # Priority 3: Clause Punctuation (Comma)
+            # Bonus: 1000.
+            c_clause = find_last_in_range(search_start, search_end, clause_punct)
+            if c_clause != -1:
+                candidates.append((c_clause, 1000))
+            
+            # Priority 4: Spaces (for English/Code)
+            # Bonus: 0.
+            c_space = -1
+            for i in range(search_end - 1, search_start - 1, -1):
+                if para[i].isspace():
+                    c_space = i + 1
+                    break
+            if c_space != -1:
+                candidates.append((c_space, 0))
+
+            # Select best candidate
+            best_cut = -1
+            best_score = -1
+            
+            for cut_idx, weight in candidates:
+                score = (cut_idx - s) + weight
+                if score > best_score:
+                    best_score = score
+                    best_cut = cut_idx
+            
+            # Fallback: If no valid cut found in preferred range (e.g. first 2000 chars have no punctuation)
+            if best_cut == -1:
+                # Try searching in the "small chunk" range [s, search_start]
+                # Prioritize Strong > Weak > Clause > Space > Hard Cut
+                fallback_end = search_start
+                
+                c_strong = find_last_in_range(s, fallback_end, strong_punct)
+                if c_strong != -1:
+                    best_cut = c_strong
+                elif (c_weak := find_last_in_range(s, fallback_end, weak_punct)) != -1:
+                    best_cut = c_weak
+                elif (c_clause := find_last_in_range(s, fallback_end, clause_punct)) != -1:
+                    best_cut = c_clause
+                elif (c_space := find_last_in_range(s, fallback_end, {' ', '\t', '\n'})) != -1:
+                     best_cut = c_space
+                else:
+                    best_cut = target # Hard cut
+            
+            # Final Safety Check
+            if best_cut <= s:
+                best_cut = target
+
+            parts.append(para[s:best_cut])
+            
+            # If we reached the end of the paragraph, stop here.
+            # No need to backtrack for overlap if we are done.
+            if best_cut >= len(para):
+                break
+            
+            # Calculate next start with overlap
+            next_s = max(0, best_cut - overlap)
+            if next_s <= s:
+                next_s = best_cut
+            s = next_s
+            
+        return parts
+
     def _chunk_text(self, text: str, chunk_size: int = 5000, overlap: int = 500) -> List[str]:
         """
         Split text into chunks respecting paragraph boundaries.
@@ -674,13 +975,7 @@ class SemanticChecker:
                     if current_len == 0:
                         # Single huge paragraph - split by character count
                         para = paragraphs[end_idx]
-                        s = 0
-                        while s < len(para):
-                            e = s + chunk_size
-                            chunks.append(para[s:e])
-                            if e >= len(para):
-                                break
-                            s = e - overlap
+                        chunks.extend(self._split_long_paragraph(para, chunk_size, overlap))
                         
                         start_idx += 1
                         end_idx = start_idx # Signal processed
@@ -743,58 +1038,70 @@ class SemanticChecker:
             # Fallback if mapper produced empty text (e.g. no elements)
             text_content = _resolve_text_content(content, layout_data)
         
-        print(f"DEBUG: text_content length: {len(text_content)}")
+        logger.debug(f"text_content length: {len(text_content)}")
         
         # 1. 规则校验 (各模块独立执行)
         try:
-            print("DEBUG: Running typo_checker...", flush=True)
+            logger.debug("Running typo_checker...")
             self.typo_checker.check(text_content, issues, mapper)
         except Exception as e:
-            print(f"ERROR: typo_checker failed: {e}", flush=True)
+            logger.error(f"typo_checker failed: {e}")
 
         try:
-            print("DEBUG: Running term_checker...", flush=True)
+            logger.debug("Running term_checker...")
             self.term_checker.check(text_content, issues, mapper)
         except Exception as e:
-            print(f"ERROR: term_checker failed: {e}", flush=True)
+            logger.error(f"term_checker failed: {e}")
 
         try:
-            print("DEBUG: Running punct_checker...", flush=True)
+            logger.debug("Running punct_checker...")
             self.punct_checker.check(text_content, layout_data, issues, mapper)
         except Exception as e:
-            print(f"ERROR: punct_checker failed: {e}", flush=True)
+            logger.error(f"punct_checker failed: {e}")
 
         try:
-            print("DEBUG: Running cite_checker...", flush=True)
+            logger.debug("Running cite_checker...")
             self.cite_checker.check(text_content, layout_data, issues, mapper)
-            print("DEBUG: cite_checker finished.", flush=True)
+            logger.debug("cite_checker finished.")
         except Exception as e:
-            print(f"ERROR: cite_checker failed: {e}", flush=True)
+            logger.error(f"cite_checker failed: {e}")
         
         # 2. LLM 辅助扫描 (Gemini 1.5 Flash / Qwen)
         # 利用长上下文能力辅助扫描复杂格式问题
         # Ref: 分工明细 - LLM Scanner
-        if self.llm_client.provider == "none":
-            print("WARNING: LLM provider not configured or API Key missing. Skipping LLM scan.", flush=True)
+        llm_cfg = self.rules.get("llm_scan", {}) if isinstance(self.rules, dict) else {}
+        llm_enabled = bool(llm_cfg.get("enabled", False))
+        llm_max_text_chars = int(llm_cfg.get("max_text_chars", 60000))
+        llm_max_chunks = int(llm_cfg.get("max_chunks", 2))
+
+        if not llm_enabled:
+            logger.warning("LLM scan disabled by rules (llm_scan.enabled=false). Skipping LLM scan.")
+            llm_feedback = ""
+            all_llm_issues = []
+        elif self.llm_client.provider == "none":
+            logger.warning("LLM scan unavailable (LLM provider not configured or API key missing). Skipping LLM scan.")
             llm_feedback = ""
             all_llm_issues = []
         else:
-            print(f"DEBUG: Starting LLM scan with provider: {self.llm_client.provider}...", flush=True)
+            logger.debug(f"Starting LLM scan with provider: {self.llm_client.provider}...")
             llm_feedback = ""
             all_llm_issues = []
             
             try:
+                llm_text = text_content
                 # Process text in chunks for LLM
                 # Increase chunk size to 15000 to reduce calls and preserve context (as requested by user)
                 # Modern LLMs (Gemini/Qwen) handle large context well.
-                chunks = self._chunk_text(text_content, chunk_size=15000, overlap=500)
-                print(f"DEBUG: Chunks created: {len(chunks)}", flush=True)
+                # Removed limit on chunks to process full document
+                chunks = self._chunk_text(llm_text, chunk_size=15000, overlap=500)
+                logger.debug(f"Chunks created: {len(chunks)}")
                 
                 feedback_parts = []
                 last_pos = 0
                 
                 for i, chunk in enumerate(chunks):
-                    print(f"DEBUG: Processing chunk {i+1}/{len(chunks)}... Length: {len(chunk)}", flush=True)
+                    print(f"Processing chunk {i+1}/{len(chunks)}... Length: {len(chunk)}")
+                    logger.debug(f"Processing chunk {i+1}/{len(chunks)}... Length: {len(chunk)}")
                     
                     # Calculate page range for this chunk
                     page_range = "?"
@@ -834,19 +1141,15 @@ class SemanticChecker:
                                     
                             all_llm_issues.extend(chunk_issues)
                     except Exception as e:
-                        print(f"ERROR: Chunk {i+1} processing failed: {e}", flush=True)
-                        # Log error but continue with other chunks
-                        pass
+                        logger.error(f"Chunk {i+1} processing failed: {e}")
 
 
                 
                 # Aggregate results
                 llm_feedback = "\n".join(feedback_parts)
-                print("DEBUG: LLM scan completed.", flush=True)
+                logger.debug("LLM scan completed.")
             except Exception as e:
-                print(f"ERROR: LLM scan failed: {e}", flush=True)
-                import traceback
-                traceback.print_exc()
+                logger.exception(f"LLM scan failed: {e}")
         
         # Merge LLM issues into main issues list
         if all_llm_issues:
@@ -907,8 +1210,18 @@ class SemanticChecker:
             issues = []
             
         # Post-process issues to handle false positives from LLM
+        allowed_llm_issue_types = {
+            "Terminology_Inconsistency",
+            "Terminology_Forbidden",
+            "Terminology_Language",
+            "Abbreviation_Definition",
+            "Citation_Placeholder",
+        }
+
         filtered_issues = []
         for issue in issues:
+            if issue.get("issue_type") not in allowed_llm_issue_types:
+                continue
             # Fix for "Citation_Placeholder" being too aggressive on isolated lines
             # If evidence looks like a valid citation (e.g. [12], [21,23]), it's likely a layout/parsing artifact, not a missing placeholder.
             if issue.get("issue_type") == "Citation_Placeholder":

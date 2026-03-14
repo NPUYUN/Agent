@@ -3,7 +3,8 @@ import os
 import asyncio
 from typing import Dict, Any
 from sqlalchemy import select
-from .database import db_manager, ExpertComment
+from sqlalchemy.exc import ProgrammingError
+from .database import db_manager, AgentRule
 from utils.logger import setup_logger
 
 logger = setup_logger(__name__)
@@ -41,28 +42,33 @@ class RuleEngine:
         """
         try:
             async for session in db_manager.get_session():
-                stmt = select(ExpertComment)
+                stmt = select(AgentRule)
                 result = await session.execute(stmt)
-                comments = result.scalars().all()
+                rules = result.scalars().all()
                 
-                for comment in comments:
-                    # Parse rule_content (assuming it's stored as JSON string or YAML string)
-                    # For simplicity, we assume it's a JSON string or direct value if simple
-                    # Here we might need to parse it if it's complex structure
-                    # But for now, let's assume rule_id maps to a config key
-                    # and rule_content is the value (or part of it)
-                    
-                    # Example: rule_id="typo_check", rule_content='{"max_typos": 10}'
+                for rule in rules:
                     try:
-                        # Try parsing as JSON/YAML
-                        content = yaml.safe_load(comment.rule_content)
-                        self.rules[comment.rule_id] = content
+                        content = yaml.safe_load(rule.content)
+                        self.rules[rule.rule_id] = content
                     except:
-                        self.rules[comment.rule_id] = comment.rule_content
+                        self.rules[rule.rule_id] = rule.content
                 
-                logger.info(f"Loaded {len(comments)} rules from DB, total rules: {len(self.rules)}")
+                logger.info(f"Loaded {len(rules)} rules from DB, total rules: {len(self.rules)}")
                 break # Close session
         except Exception as e:
+            if isinstance(e, ProgrammingError):
+                orig = getattr(e, "orig", None)
+                sqlstate = getattr(orig, "sqlstate", None) or getattr(orig, "pgcode", None)
+                combined = f"{e} {orig}" if orig else str(e)
+                lowered = combined.lower()
+                if (
+                    (sqlstate == "42P01")
+                    or ("undefinedtable" in lowered)
+                    or ("does not exist" in lowered)
+                    or ("relation" in lowered and "does not exist" in lowered)
+                ) and ("agent_rules" in lowered):
+                    logger.warning("Rules table missing in DB (agent_rules). Skipping DB rule loading and using YAML rules.")
+                    return
             logger.error(f"Failed to load rules from DB: {e}")
             # Fallback to YAML is already done in __init__
 

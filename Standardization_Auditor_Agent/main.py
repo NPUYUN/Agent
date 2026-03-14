@@ -10,6 +10,17 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 if current_dir not in sys.path:
     sys.path.insert(0, current_dir)
 
+if __name__ == "__main__":
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv()
+    except Exception:
+        pass
+
+    if not os.getenv("LLM_PROVIDER"):
+        os.environ["LLM_PROVIDER"] = "deepseek"
+
 from models import AuditRequest, AuditResponse, AgentInfo, AuditResult, ResourceUsage, AuditLevel, IssueDetail
 from core.layout_analysis import LayoutAnalyzer
 from api.layout_routes import router as layout_router
@@ -83,7 +94,11 @@ async def general_exception_handler(request: Request, exc: Exception):
 def _collect_tags(issues):
     tag_set = set()
     for issue in issues:
-        issue_type = issue.get("issue_type", "")
+        issue_type = ""
+        if isinstance(issue, dict):
+            issue_type = issue.get("issue_type", "") or ""
+        else:
+            issue_type = getattr(issue, "issue_type", "") or ""
         if not issue_type:
             continue
         if "Citation" in issue_type:
@@ -96,29 +111,46 @@ def _collect_tags(issues):
             tag_set.add(AuditTag.PUNCTUATION_ERROR.value)
     return list(tag_set)
 
-async def save_result_to_db(request: AuditRequest, response: AuditResponse, status: TaskStatus, error_msg: str = None):
+async def save_result_to_db(request: AuditRequest, response: AuditResponse | None, status: TaskStatus, error_msg: str | None = None):
     """
     异步写入 review_tasks 表，符合开发规范的数据持久化要求
     """
     try:
         async for session in db_manager.get_session():
-            task = ReviewTask(
-                task_id=request.request_id,
-                paper_id=request.metadata.paper_id,
-                chunk_id=request.metadata.chunk_id,
-                agent_name=AGENT_NAME,
-                agent_version=AGENT_VERSION,
-                status=status,
-                score=response.result.score if response else 0,
-                audit_level=response.result.audit_level.value if response else None,
-                result_json=response.result.model_dump(mode='json') if response else None,
-                error_msg=error_msg,
-                usage_tokens=response.usage.tokens if response else 0,
-                latency_ms=response.usage.latency_ms if response else 0
+            stmt = (
+                select(ReviewTask)
+                .where(
+                    ReviewTask.task_id == request.request_id,
+                    ReviewTask.paper_id == request.metadata.paper_id,
+                    ReviewTask.chunk_id == request.metadata.chunk_id,
+                    ReviewTask.agent_name == AGENT_NAME,
+                )
+                .order_by(ReviewTask.created_at.desc())
+                .limit(1)
             )
-            session.add(task)
+            result = await session.execute(stmt)
+            task = result.scalar_one_or_none()
+
+            if task is None:
+                task = ReviewTask(
+                    task_id=request.request_id,
+                    paper_id=request.metadata.paper_id,
+                    chunk_id=request.metadata.chunk_id,
+                    agent_name=AGENT_NAME,
+                    agent_version=AGENT_VERSION,
+                )
+                session.add(task)
+
+            task.agent_version = AGENT_VERSION
+            task.status = status
+            task.score = response.result.score if response else None
+            task.audit_level = response.result.audit_level.value if response else None
+            task.result_json = response.model_dump(mode="json") if response else None
+            task.error_msg = error_msg
+            task.usage_tokens = response.usage.tokens if response else 0
+            task.latency_ms = response.usage.latency_ms if response else 0
             await session.commit()
-            logger.info(f"Task {request.request_id} saved to DB.")
+            logger.info(f"Task {request.request_id} saved to DB (status={status}).")
             break
     except Exception as e:
         logger.error(f"Failed to save task to DB: {e}")
@@ -133,6 +165,8 @@ async def audit_paper(request: AuditRequest):
     logger.info(f"Received audit request: {request.request_id} for paper {request.metadata.paper_id}")
     
     try:
+        await save_result_to_db(request, None, TaskStatus.RUNNING)
+
         # Check if content is provided, if not fetch from DB
         content = request.payload.content
         if not content:
@@ -153,7 +187,7 @@ async def audit_paper(request: AuditRequest):
                 logger.error(f"Failed to fetch content from DB: {e}")
             
             if not content:
-                raise HTTPException(status_code=404, detail=f"Content not found for paper {request.metadata.paper_id} chunk {request.metadata.chunk_id}")
+                raise HTTPException(status_code=400, detail=f"Missing payload.content and no matching content found in DB for paper {request.metadata.paper_id} chunk {request.metadata.chunk_id}")
             
             # Update request payload with fetched content
             request.payload.content = content
@@ -203,9 +237,15 @@ async def audit_paper(request: AuditRequest):
         if issues:
             comment = f"发现 {len(issues)} 个格式问题。"
             suggestion = "建议根据详细报告进行修改。"
+
+        rag_comment, rag_suggestion = await semantic_checker.generate_expert_commentary(
+            request.payload.content, issues
+        )
+        if rag_comment and rag_suggestion:
+            comment = rag_comment
+            suggestion = rag_suggestion
             
-        # 使用规范定义的专属Tags
-        tags = _collect_tags(issues) or [AuditTag.CITATION_INCONSISTENCY.value, AuditTag.LABEL_MISSING.value]
+        tags = _collect_tags(issues) if issues else []
         
         # 计算耗时
         latency_ms = int((time.time() - start_time) * 1000)
@@ -286,9 +326,21 @@ if __name__ == "__main__":
     import argparse
     import uvicorn
 
-    parser = argparse.ArgumentParser(description="Standardization Auditor Agent")
-    parser.add_argument("--pdf", help="Path to PDF file for direct auditing")
-    parser.add_argument("--output", help="Path to save validation report (JSON)")
+    parser = argparse.ArgumentParser(
+        description="Standardization Auditor Agent\n\n"
+                    "用法：\n"
+                    "- 不带参数：启动 FastAPI 服务\n"
+                    "- 带 --pdf：直接审计本地 PDF 并生成报告",
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
+    parser.add_argument("--pdf", help="本地 PDF 文件路径（启用 CLI 审计模式）")
+    parser.add_argument(
+        "--output",
+        help="输出路径：目录或 .json 文件路径。\n"
+             "- 目录：Markdown 报告输出到该目录\n"
+             "- .json：除 Markdown 外，额外生成该 JSON 汇总文件\n"
+             "默认：./report",
+    )
     args = parser.parse_args()
 
     if args.pdf:
@@ -336,10 +388,26 @@ if __name__ == "__main__":
             
             # 2. Layout Analysis
             print("Running Layout Analysis...")
-            layout_data = await layout_analyzer.analyze(pdf_path)
+            try:
+                layout_data = await asyncio.wait_for(layout_analyzer.analyze(pdf_path), timeout=LAYOUT_ANALYSIS_TIMEOUT)
+            except asyncio.TimeoutError:
+                layout_data = {
+                    "elements": [],
+                    "layout_result": {"layout_issues": []},
+                    "parse_errors": [{"error_type": "layout_timeout", "message": "layout analysis timeout"}],
+                    "parse_report": {},
+                }
+            except Exception as e:
+                layout_data = {
+                    "elements": [],
+                    "layout_result": {"layout_issues": []},
+                    "parse_errors": [{"error_type": "layout_error", "message": str(e)}],
+                    "parse_report": {},
+                }
             
             # 3. Semantic Check
-            print("Running Semantic Check (powered by Qwen API)...")
+            provider = getattr(getattr(semantic_checker, "llm_client", None), "provider", "none")
+            print(f"Running Semantic Check (powered by {provider} API)...")
             semantic_result = await semantic_checker.check(text_content, layout_data)
             
             # 4. Merge Issues

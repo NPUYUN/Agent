@@ -7,8 +7,6 @@ typo_check:
   max_typos_per_page_warning: 2    # 单页错别字红线
   max_typos_total_warning: 10      # 全文错别字红线
   critical_keywords:               # 关键术语 (遇到错写直接 Critical)
-    - "深度学习"
-    - "卷积神经网络"
     - "TensorFlow"
     - "Pydantic"
 
@@ -43,6 +41,9 @@ heading_check:
   max_depth: 4                     # 最大允许标题层级 (例如: 1.1.1.1)
   font_size_hierarchy: true        # 是否强制检查字体大小递减 (H1 > H2 > H3)
   bold_requirement: [1, 2]         # 必须加粗的层级 (H1, H2)
+  continuity_check: false          # 是否检查标题编号连续性（易受分页/目录/日期等影响，默认关闭以减少误判）
+  continuity_severity: "Info"      # 开启连续性检查时的默认严重级别
+  column_threshold: 200.0          # 同栏判断阈值（用于降低多栏/页眉页脚误判）
 
 # 6. 图表位置规则 (Figure/Table Position)
 figure_table_check:
@@ -56,3 +57,8 @@ formula_check:
   alignment: "centered"            # 公式对齐方式: "centered" (居中), "left" (左对齐)
   numbering: "right"               # 编号位置: "right" (右侧), "left" (左侧)
   font_consistency: true           # 是否检查公式字体与正文一致性 (或特定数学字体)
+
+llm_scan:
+  enabled: true
+  max_text_chars: 60000
+  max_chunks: 2

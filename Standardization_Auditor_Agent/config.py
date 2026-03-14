@@ -28,8 +28,12 @@ DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 DEEPSEEK_MODEL_NAME = os.getenv("DEEPSEEK_MODEL_NAME", "deepseek-chat")
 
 # LLM Provider: "gemini", "qwen" or "deepseek"
-LLM_PROVIDER = os.getenv("LLM_PROVIDER", "none")
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "deepseek")
 LLM_TIMEOUT_SEC = int(os.getenv("LLM_TIMEOUT_SEC", "60"))
+
+# RAG / Embedding 配置
+SBERT_MODEL_NAME = os.getenv("SBERT_MODEL_NAME", "sentence-transformers/paraphrase-multilingual-mpnet-base-v2")
+SBERT_DEVICE = os.getenv("SBERT_DEVICE", "")
 
 # 布局分析配置
 LAYOUT_ANALYSIS_TIMEOUT = int(os.getenv("LAYOUT_ANALYSIS_TIMEOUT", "300")) # 5分钟，适应长文档处理
@@ -37,8 +41,7 @@ LAYOUT_ANALYSIS_TIMEOUT = int(os.getenv("LAYOUT_ANALYSIS_TIMEOUT", "300")) # 5�
 # 数据库配置
 # Remote (Default)
 # DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+asyncpg://user:password@localhost/dbname")
-# Local (Testing) - User: postgres, Pass: Ycc20060308, DB: agent_db
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+asyncpg://postgres:Ycc20060308@localhost:5432/agent_db")
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+asyncpg://postgres:postgres@localhost:5433/agent_db")
 
 # 专属System Prompt (Moved to core/prompts.py)
 # SYSTEM_PROMPT = "..."

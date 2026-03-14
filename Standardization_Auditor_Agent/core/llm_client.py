@@ -2,6 +2,7 @@ from google import genai
 from google.genai import types
 from openai import AsyncOpenAI
 from typing import Optional
+from utils.logger import setup_logger
 from config import (
     GEMINI_MODEL_NAME, GOOGLE_API_KEY,
     QWEN_API_KEY, QWEN_BASE_URL, QWEN_MODEL_NAME,
@@ -9,6 +10,8 @@ from config import (
     LLM_PROVIDER, LLM_TIMEOUT_SEC
 )
 from core.prompts import SYSTEM_PROMPT_MAIN as SYSTEM_PROMPT
+
+logger = setup_logger(__name__)
 
 class LLMClient:
     """
@@ -67,6 +70,69 @@ class LLMClient:
         else:
             return ""
 
+    async def generate_text(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        temperature: float = 0.1,
+        max_tokens: int = 800,
+    ) -> str:
+        if self.provider == "gemini":
+            if not self.gemini_client:
+                return ""
+            try:
+                config = types.GenerateContentConfig(
+                    system_instruction=system_prompt,
+                    temperature=temperature,
+                    max_output_tokens=max_tokens,
+                )
+                response = await self.gemini_client.aio.models.generate_content(
+                    model=self.model_name,
+                    contents=user_prompt,
+                    config=config,
+                )
+                return response.text or ""
+            except Exception as e:
+                logger.error(f"LLM Error (Gemini): {e}", exc_info=True)
+                return ""
+        elif self.provider == "qwen":
+            if not self.qwen_client:
+                return ""
+            try:
+                response = await self.qwen_client.chat.completions.create(
+                    model=self.model_name,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    timeout=LLM_TIMEOUT_SEC,
+                )
+                return response.choices[0].message.content or ""
+            except Exception as e:
+                logger.error(f"LLM Error (Qwen): {e}", exc_info=True)
+                return ""
+        elif self.provider == "deepseek":
+            if not self.deepseek_client:
+                return ""
+            try:
+                response = await self.deepseek_client.chat.completions.create(
+                    model=self.model_name,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    timeout=LLM_TIMEOUT_SEC,
+                )
+                return response.choices[0].message.content or ""
+            except Exception as e:
+                logger.error(f"LLM Error (DeepSeek): {e}", exc_info=True)
+                return ""
+        return ""
+
     async def _scan_with_gemini(self, content: str, temperature: float) -> str:
         if not self.gemini_client:
             return ""
@@ -85,9 +151,7 @@ class LLMClient:
             )
             return response.text
         except Exception as e:
-            print(f"LLM Error (Gemini): {e}", flush=True)
-            import traceback
-            traceback.print_exc()
+            logger.error(f"LLM Error (Gemini): {e}", exc_info=True)
             return ""
 
     async def _scan_with_qwen(self, content: str, temperature: float) -> str:
@@ -107,9 +171,7 @@ class LLMClient:
             )
             return response.choices[0].message.content
         except Exception as e:
-            print(f"LLM Error (Qwen): {e}", flush=True)
-            import traceback
-            traceback.print_exc()
+            logger.error(f"LLM Error (Qwen): {e}", exc_info=True)
             return ""
 
     async def _scan_with_deepseek(self, content: str, temperature: float) -> str:
@@ -129,9 +191,7 @@ class LLMClient:
             )
             return response.choices[0].message.content
         except Exception as e:
-            print(f"LLM Error (DeepSeek): {e}", flush=True)
-            import traceback
-            traceback.print_exc()
+            logger.error(f"LLM Error (DeepSeek): {e}", exc_info=True)
             return ""
 
 # 为了兼容旧代码，保留 GeminiClient 别名，但建议迁移到 LLMClient
