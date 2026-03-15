@@ -23,18 +23,25 @@ terminology_check:
   
   # 明确禁止的写法 (用于生成建议)
   forbidden_variants:
-    "Deep Learning": ["deep-learning", "deep learning"] # 禁止全小写或连字符
     "CNN": ["C.N.N."]
+  warn_on_mixed_allowed_forms: false
 
 # 3. 标点符号规则
 punctuation_check:
   allow_mixed_punctuation: false   # 是否允许中英文标点混用 (默认 False)
   check_citation_position: true    # 检查引用标注是否在标点符号内/外 (根据规范)
+  allow_proof_dot: true
+  allow_keywords_colon: true
+  skip_math_like: true
 
 # 4. 引用格式语义规则
 citation_check:
-  style: "IEEE"                    # 目标引用风格: "IEEE" (如 [1]) 或 "APA" (如 (Wang, 2023))
+  style: "IEEE"                    # 目标引用风格: "IEEE" (如 [1]) / "APA" (如 (Wang, 2023)) / "AUTO"
   check_reference_matching: true   # 是否校验正文引用与参考文献列表的匹配性
+  allow_mixed_styles: false
+  enforce_style: true
+  style_inconsistent_severity: "Warning"
+  style_mismatch_severity: "Warning"
 
 # 5. 标题层级规则 (Heading Hierarchy)
 heading_check:
@@ -59,6 +66,13 @@ formula_check:
   font_consistency: true           # 是否检查公式字体与正文一致性 (或特定数学字体)
   require_numbering: true          # 是否要求公式必须有编号
   check_reference: true            # 是否检查公式编号在正文中被引用
+  unreferenced_ratio_threshold: 0.2
+  min_unreferenced_count: 3
+
+scoring:
+  critical_weight: 5.0
+  warning_weight: 2.0
+  info_weight: 0.3
 
 llm_scan:
   enabled: true

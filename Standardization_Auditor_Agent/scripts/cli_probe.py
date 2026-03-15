@@ -12,10 +12,7 @@ from core.semantic_check import SemanticChecker
 
 async def run(pdf_path: str):
     rule_engine = RuleEngine(config_path=os.path.join(os.getcwd(), "rules.yaml"))
-    try:
-        await rule_engine.load_rules_from_db()
-    except Exception:
-        pass
+    await rule_engine.load_rules_from_db()
 
     layout_analyzer = LayoutAnalyzer()
     semantic_checker = SemanticChecker()

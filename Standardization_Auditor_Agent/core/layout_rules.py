@@ -16,6 +16,15 @@ from .layout_schema import LayoutIssue
 
 
 def check_citation_reference_match(citations: List[Any], references: List[Any]) -> List[LayoutIssue]:
+    def _is_year_like(num: str) -> bool:
+        if not num or not num.isdigit() or len(num) != 4:
+            return False
+        try:
+            v = int(num)
+        except Exception:
+            return False
+        return 1800 <= v <= 2100
+
     ref_nums = set()
     for r in references:
         m = re.match(r"^\s*(?:\[\s*(\d+)\s*\]|［\s*(\d+)\s*］|\(\s*(\d+)\s*\)|（\s*(\d+)\s*）|(\d+)\.|(\d+)\s)", r.content)
@@ -25,8 +34,14 @@ def check_citation_reference_match(citations: List[Any], references: List[Any]) 
                 ref_nums.add(num)
     issues: List[LayoutIssue] = []
     for c in citations:
+        content = str(getattr(c, "content", "") or "")
+        if not content:
+            continue
+        if re.search(r"[（(].*\d{4}[a-z]?[)）]", content) and re.search(r"[A-Za-z]", content):
+            continue
+
         nums: List[str] = []
-        for inner in re.findall(r"[\[［]([^\]］]{1,50})[\]］]", c.content or ""):
+        for inner in re.findall(r"[\[［]([^\]］]{1,50})[\]］]", content):
             parts = [p for p in re.split(r"[,\s;，；]+", inner.strip()) if p]
             for p in parts:
                 m_range = re.match(r"^(\d+)\s*[-–]\s*(\d+)$", p)
@@ -34,16 +49,16 @@ def check_citation_reference_match(citations: List[Any], references: List[Any]) 
                     start = int(m_range.group(1))
                     end = int(m_range.group(2))
                     if 0 < start <= end and (end - start) <= 50:
-                        nums.extend([str(n) for n in range(start, end + 1)])
+                        for n in range(start, end + 1):
+                            s = str(n)
+                            if s != "0" and not _is_year_like(s):
+                                nums.append(s)
                     continue
                 if re.match(r"^\d+$", p):
-                    if p != "0":
+                    if p != "0" and not _is_year_like(p):
                         nums.append(p)
         if not nums:
-            m = re.search(r"\b(\d+)\b", c.content or "")
-            if m:
-                if m.group(1) != "0":
-                    nums = [m.group(1)]
+            continue
         missing = sorted({n for n in nums if n not in ref_nums}, key=lambda x: int(x))
         if missing:
             issues.append(
@@ -52,7 +67,7 @@ def check_citation_reference_match(citations: List[Any], references: List[Any]) 
                     severity="Warning",
                     page_num=c.page_num,
                     bbox=c.bbox,
-                    evidence=c.content,
+                    evidence=content,
                     message=f"引用标注在参考文献区未找到对应条目: {', '.join(missing)}",
                     location={"section": "unknown", "line_start": 0}
                 )

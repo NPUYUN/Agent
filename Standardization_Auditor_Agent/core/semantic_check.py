@@ -180,9 +180,12 @@ def _extract_numeric_citations(content: str) -> List[str]:
 
 def _extract_author_year_citations(content: str) -> List[str]:
     results = []
-    for m in re.finditer(r"\(([^()]*\d{4}[a-z]?[^()]*)\)", content):
-        value = m.group(1)
-        if re.search(r"[A-Za-z]", value):
+    pattern = re.compile(
+        r"\(([^()]*\b[A-Za-z][A-Za-z'\-]+(?:\s+et\s+al\.)?[^()]*?,\s*\d{4}[a-z]?[^()]*)\)"
+    )
+    for m in pattern.finditer(content or ""):
+        value = (m.group(1) or "").strip()
+        if value:
             results.append(value)
     return results
 
@@ -348,6 +351,13 @@ class TerminologyChecker:
         self.config = config
         self.terms = config.get("terms", {})
         self.forbidden_variants = config.get("forbidden_variants", {})
+        self.warn_on_mixed_allowed_forms = bool(config.get("warn_on_mixed_allowed_forms", False))
+
+    def _norm_en(self, s: str) -> str:
+        t = (s or "").strip().lower()
+        t = re.sub(r"[_\\-]+", " ", t)
+        t = re.sub(r"\\s+", " ", t)
+        return t
 
     def check(self, content: str, issues: List[Dict], mapper: Optional['TextPageMapper'] = None):
         """
@@ -358,49 +368,39 @@ class TerminologyChecker:
         if not content:
             return
         
-        # Check canonical terms consistency
-        for canonical, variants in self.terms.items():
-            allowed_forms = {canonical}
-            if variants:
-                allowed_forms.update(variants)
-            
-            # Escape regex characters in the term
-            # Use \b boundaries for English words
-            if re.search(r"[A-Za-z]", canonical):
-                escaped_term = re.escape(canonical)
-                # Replace escaped spaces with \s+ to match varying whitespace
-                pattern = r"\b" + escaped_term.replace(r"\ ", r"\s+") + r"\b"
-            else:
-                pattern = re.escape(canonical)
-                
-            # Find ALL occurrences (case-insensitive)
-            matches = re.finditer(pattern, content, flags=re.IGNORECASE)
-            
-            # Check if any found match is NOT in the allowed set
-            inconsistent_usages = set()
-            found_pages = set()
-            for m in matches:
-                usage = m.group()
-                if usage not in allowed_forms:
-                    inconsistent_usages.add(usage)
-                    if mapper:
-                        found_pages.add(mapper.get_page_num(m.start()))
-            
-            if inconsistent_usages:
-                pg_str = "?"
-                if found_pages:
-                    sorted_pgs = sorted(list(found_pages), key=lambda x: int(x) if x.isdigit() else 999)
-                    pg_str = ", ".join(sorted_pgs)
-                    
-                issues.append(
-                    {
-                        "issue_type": "Terminology_Inconsistent",
-                        "severity": "Warning",
-                        "evidence": ", ".join(inconsistent_usages),
-                        "page_num": pg_str,
-                        "message": f"术语写法不一致，建议统一为：{canonical}",
-                    }
-                )
+        if self.warn_on_mixed_allowed_forms:
+            for canonical, variants in self.terms.items():
+                forms = [canonical] + list(variants or [])
+                used_norm = set()
+                found_pages = set()
+                for form in forms:
+                    if not form:
+                        continue
+                    if re.search(r"[A-Za-z]", form):
+                        patt = r"\b" + re.escape(form).replace(r"\ ", r"\s+") + r"\b"
+                        for m in re.finditer(patt, content, flags=re.IGNORECASE):
+                            used_norm.add(self._norm_en(m.group()))
+                            if mapper:
+                                found_pages.add(mapper.get_page_num(m.start()))
+                    else:
+                        for m in re.finditer(re.escape(form), content):
+                            used_norm.add(form)
+                            if mapper:
+                                found_pages.add(mapper.get_page_num(m.start()))
+                if len(used_norm) > 1:
+                    pg_str = "?"
+                    if found_pages:
+                        sorted_pgs = sorted(list(found_pages), key=lambda x: int(x) if x.isdigit() else 999)
+                        pg_str = ", ".join(sorted_pgs)
+                    issues.append(
+                        {
+                            "issue_type": "Terminology_Inconsistent",
+                            "severity": "Info",
+                            "evidence": ", ".join(sorted(list(used_norm))[:6]),
+                            "page_num": pg_str,
+                            "message": f"同一术语存在多种允许写法，可考虑统一为：{canonical}",
+                        }
+                    )
 
         # Check forbidden variants
         for canonical, forbidden in self.forbidden_variants.items():
@@ -446,6 +446,23 @@ class PunctuationChecker:
         self.config = config
         self.allow_mixed = config.get("allow_mixed_punctuation", False)
         self.check_position = config.get("check_citation_position", True)
+        self.allow_proof_dot = bool(config.get("allow_proof_dot", True))
+        self.allow_keywords_colon = bool(config.get("allow_keywords_colon", True))
+        self.skip_math_like = bool(config.get("skip_math_like", True))
+
+    def _is_math_like(self, s: str) -> bool:
+        t = (s or "").strip()
+        if not t:
+            return False
+        if re.search(r"[∧∨¬⇒⇔∑∫√∂∇∞≈≠≤≥±×÷]", t):
+            return True
+        if re.search(r"\b[A-Za-z]\b", t) and re.search(r"(可满足|不满足|满足|等价|推出|蕴含|合取|析取|否定)", t):
+            return True
+        if len(re.findall(r"[=<>≤≥±×÷*/+\\-≈≠]", t)) >= 2:
+            return True
+        if re.search(r"[A-Za-zα-ωΑ-Ω]\\w{0,3}\\s*(?:≤|≥|<|>)", t):
+            return True
+        return False
 
     def check(self, content: str, layout_data: Dict[str, Any], issues: List[Dict], mapper: Optional['TextPageMapper'] = None):
         """
@@ -466,6 +483,18 @@ class PunctuationChecker:
             cn_en_dot_pattern = re.compile(r"[\u4e00-\u9fff]\s*\.(?!\s*[\.\d])")
             # 1c. English text using Chinese punctuation
             en_cn_punct_pattern = re.compile(r"[a-zA-Z]{2,}\s*[，。？！；：]")
+
+            def _context_snippet(s: str, start: int, end: int, window: int = 18) -> str:
+                compact = re.sub(r"\s+", " ", s or "").strip()
+                if not compact:
+                    return ""
+                start = max(0, min(int(start), len(compact)))
+                end = max(0, min(int(end), len(compact)))
+                left = max(0, start - window)
+                right = min(len(compact), end + window)
+                prefix = "…" if left > 0 else ""
+                suffix = "…" if right < len(compact) else ""
+                return prefix + compact[left:right] + suffix
             
             for e in elements:
                 if _is_likely_reference(e):
@@ -480,6 +509,13 @@ class PunctuationChecker:
                         continue
                     if re.search(r"http[s]?://|@[A-Za-z0-9_.-]+", segment):
                         continue
+                    seg_strip = segment.strip()
+                    if self.skip_math_like and self._is_math_like(seg_strip):
+                        continue
+                    if self.allow_keywords_colon and re.match(r"^(key\\s*words|keywords|abstract)\\s*：", seg_strip, flags=re.IGNORECASE):
+                        continue
+                    if self.allow_proof_dot and re.match(r"^(证明|定理|引理|推论|命题|定义|注|例)\\s*\\.", seg_strip):
+                        continue
                     cjk_count = len(re.findall(r"[\u4e00-\u9fff]", segment))
                     en_count = len(re.findall(r"[A-Za-z]", segment))
                     num_count = len(re.findall(r"\d", segment))
@@ -489,10 +525,12 @@ class PunctuationChecker:
                     for m in cn_en_punct_pattern.finditer(segment):
                         if cjk_ratio < 0.5:
                             continue
+                        if self.allow_proof_dot and segment[max(0, m.start()-6):m.end()].strip().endswith(("证明.", "定理.", "引理.", "推论.", "命题.", "定义.", "注.", "例.")):
+                            continue
                         issues.append({
                             "issue_type": "Punctuation_Mixed",
                             "severity": "Info",
-                            "evidence": m.group(),
+                            "evidence": _context_snippet(segment, m.start(), m.end()),
                             "page_num": pg,
                             "message": "中文文本使用了英文标点",
                         })
@@ -500,10 +538,12 @@ class PunctuationChecker:
                     for m in cn_en_dot_pattern.finditer(segment):
                         if cjk_ratio < 0.5:
                             continue
+                        if self.allow_proof_dot and segment[max(0, m.start()-6):m.end()].strip().endswith(("证明.", "定理.", "引理.", "推论.", "命题.", "定义.", "注.", "例.")):
+                            continue
                         issues.append({
                             "issue_type": "Punctuation_Mixed",
                             "severity": "Info",
-                            "evidence": m.group(),
+                            "evidence": _context_snippet(segment, m.start(), m.end()),
                             "page_num": pg,
                             "message": "中文文本使用了英文标点(.)",
                         })
@@ -536,7 +576,7 @@ class PunctuationChecker:
                         issues.append({
                             "issue_type": "Punctuation_Mixed",
                             "severity": "Info",
-                            "evidence": m.group(),
+                            "evidence": _context_snippet(segment, m.start(), m.end()),
                             "page_num": pg,
                             "message": "英文文本使用了中文标点",
                         })
@@ -557,7 +597,7 @@ class PunctuationChecker:
                         issues.append({
                             "issue_type": "Citation_Position_Inconsistent",
                             "severity": "Info",
-                            "evidence": m.group(),
+                            "evidence": _context_snippet(segment, m.start(), m.end()),
                             "page_num": pg,
                             "message": "引用标注位置错误 (应置于标点符号之前)",
                         })
@@ -571,6 +611,11 @@ class CitationChecker:
     def __init__(self, config: Dict[str, Any]):
         self.config = config
         self.style = config.get("style", "IEEE")
+        self.allow_mixed_styles = bool(config.get("allow_mixed_styles", False))
+        self.enforce_style = bool(config.get("enforce_style", True))
+        self.style_inconsistent_severity = config.get("style_inconsistent_severity", "Warning")
+        self.style_mismatch_severity = config.get("style_mismatch_severity", "Warning")
+        self.reference_tail_ratio = float(config.get("reference_detect_tail_ratio", 0.25) or 0.25)
 
     def check(self, content: str, layout_data: Dict[str, Any], issues: List[Dict], mapper: Optional['TextPageMapper'] = None):
         """
@@ -587,41 +632,107 @@ class CitationChecker:
                 text_value = _element_get(e, "content")
                 if text_value:
                     reference_texts.append(str(text_value))
+
+        if not reference_texts and elements:
+            pages = []
+            for e in elements:
+                p = _element_get(e, "page_num")
+                if p is None:
+                    continue
+                try:
+                    pages.append(int(p))
+                except Exception:
+                    continue
+            max_page = max(pages) if pages else 0
+            ref_title_pat = re.compile(r"^\s*(参考文献|references?)\s*$", flags=re.IGNORECASE)
+            ref_item_pat = re.compile(r"^\s*(\[\d+\]|\d+\.)\s+\S")
+            start_page = None
+            for e in elements:
+                c = str(_element_get(e, "content") or "").strip()
+                if not c:
+                    continue
+                if ref_title_pat.match(c):
+                    try:
+                        start_page = int(_element_get(e, "page_num"))
+                    except Exception:
+                        start_page = None
+                    break
+            if start_page is None and max_page > 0:
+                tail_pages = max(1, int(round(max_page * float(1.0 - self.reference_tail_ratio))))
+                start_page = tail_pages
+            if start_page is not None:
+                for e in elements:
+                    p = _element_get(e, "page_num")
+                    try:
+                        p_int = int(p)
+                    except Exception:
+                        continue
+                    if p_int < int(start_page):
+                        continue
+                    c = str(_element_get(e, "content") or "")
+                    if not c or len(c) < 15:
+                        continue
+                    if ref_item_pat.match(c):
+                        reference_texts.append(c)
         
         # Sort or process reference texts if needed (layout analysis might be out of order?)
         # For now, assume sequential.
         ref_nums = set(_extract_reference_numbers(reference_texts))
         numeric_citations = _extract_numeric_citations(text)
         author_year_citations = _extract_author_year_citations(text)
+
+        def _format_pages(pages: set) -> str:
+            if not pages:
+                return "?"
+            try:
+                return ", ".join(sorted({str(p) for p in pages}, key=lambda x: int(x) if str(x).isdigit() else 9999))
+            except Exception:
+                return ", ".join(sorted({str(p) for p in pages}))
+
+        numeric_pages = set()
+        author_year_pages = set()
+        if mapper:
+            for m in re.finditer(r"(?<![\w\]])\[(\d+(?:\s*,\s*\d+)*)\]", text):
+                numeric_pages.add(mapper.get_page_num(m.start()))
+            author_year_pat = re.compile(
+                r"\(([^()]*\b[A-Za-z][A-Za-z'\-]+(?:\s+et\s+al\.)?[^()]*?,\s*\d{4}[a-z]?[^()]*)\)"
+            )
+            for m in author_year_pat.finditer(text):
+                author_year_pages.add(mapper.get_page_num(m.start()))
         
         if numeric_citations and author_year_citations:
-            issues.append(
-                {
-                    "issue_type": "Citation_Style_Inconsistent",
-                    "severity": "Warning",
-                    "evidence": "numeric + author-year",
-                    "message": "正文引用风格不一致",
-                }
-            )
-        style = (self.style or "").lower()
-        if style in {"ieee", "numeric"} and author_year_citations:
-            issues.append(
-                {
-                    "issue_type": "Citation_Style_Mismatch",
-                    "severity": "Warning",
-                    "evidence": "author-year",
-                    "message": "引用风格与配置不一致，建议使用数字编号引用",
-                }
-            )
-        if style in {"apa", "mla", "author-year"} and numeric_citations:
-            issues.append(
-                {
-                    "issue_type": "Citation_Style_Mismatch",
-                    "severity": "Warning",
-                    "evidence": "numeric",
-                    "message": "引用风格与配置不一致，建议使用作者-年份引用",
-                }
-            )
+            if not self.allow_mixed_styles:
+                issues.append(
+                    {
+                        "issue_type": "Citation_Style_Inconsistent",
+                        "severity": self.style_inconsistent_severity,
+                        "evidence": "numeric + author-year",
+                        "page_num": _format_pages(numeric_pages | author_year_pages),
+                        "message": "正文引用风格不一致",
+                    }
+                )
+        style = (self.style or "").strip().lower()
+        if style and style not in {"auto"} and self.enforce_style:
+            if style in {"ieee", "numeric"} and author_year_citations:
+                issues.append(
+                    {
+                        "issue_type": "Citation_Style_Mismatch",
+                        "severity": self.style_mismatch_severity,
+                        "evidence": "author-year",
+                        "page_num": _format_pages(author_year_pages),
+                        "message": "引用风格与配置不一致，建议使用数字编号引用",
+                    }
+                )
+            if style in {"apa", "mla", "author-year"} and numeric_citations:
+                issues.append(
+                    {
+                        "issue_type": "Citation_Style_Mismatch",
+                        "severity": self.style_mismatch_severity,
+                        "evidence": "numeric",
+                        "page_num": _format_pages(numeric_pages),
+                        "message": "引用风格与配置不一致，建议使用作者-年份引用",
+                    }
+                )
         if not self.config.get("check_reference_matching", True):
             return
             
@@ -739,6 +850,31 @@ class SemanticChecker:
         self.term_checker = TerminologyChecker(self.term_checker.config)
         self.punct_checker = PunctuationChecker(self.punct_checker.config)
         self.cite_checker = CitationChecker(self.cite_checker.config)
+
+    def _dedupe_issues(self, issues: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        seen = set()
+        out: List[Dict[str, Any]] = []
+        for issue in issues or []:
+            if not isinstance(issue, dict):
+                continue
+            issue_type = str(issue.get("issue_type") or "")
+            severity = str(issue.get("severity") or issue.get("level") or "")
+            page_num = str(issue.get("page_num") or "?")
+            message = str(issue.get("message") or "")
+            evidence = str(issue.get("evidence") or "")
+            bbox = issue.get("bbox")
+            bbox_key = None
+            if isinstance(bbox, (list, tuple)) and len(bbox) == 4:
+                try:
+                    bbox_key = tuple(round(float(x), 1) for x in bbox)
+                except Exception:
+                    bbox_key = None
+            key = (issue_type, severity, page_num, message, evidence, bbox_key)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(issue)
+        return out
 
     async def _extract_facts_llm(self, text: str) -> str:
         if self.llm_client.provider == "none":
@@ -1159,6 +1295,8 @@ class SemanticChecker:
         # 避免视觉层和语义层对同一问题的重复标注
         # Ref: 分工明细 - 阶段4: 结果去重逻辑
         
+        issues = self._dedupe_issues(issues)
+
         return {
             "semantic_issues": issues,
             "llm_feedback": llm_feedback,
@@ -1257,8 +1395,10 @@ class SemanticChecker:
         critical = counts["Critical"]
         warning = counts["Warning"]
         info = counts["Info"]
-        # Relaxed scoring: Reduced weights to avoid 0 scores for initial testing
-        # Old: 15 * critical + 6 * sqrt(warning) + 2 * sqrt(info)
-        deduction = 5 * critical + 2 * math.sqrt(warning) + 0.5 * math.sqrt(info)
+        scoring = self.rules.get("scoring", {}) if isinstance(self.rules, dict) else {}
+        critical_w = float(scoring.get("critical_weight", 5.0) or 5.0)
+        warning_w = float(scoring.get("warning_weight", 2.0) or 2.0)
+        info_w = float(scoring.get("info_weight", 0.5) or 0.5)
+        deduction = critical_w * critical + warning_w * math.sqrt(warning) + info_w * math.sqrt(info)
         score = 100 - int(round(deduction))
         return max(0, min(100, score))

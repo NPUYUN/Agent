@@ -7,6 +7,7 @@ import enum
 from datetime import datetime
 from config import DATABASE_URL
 import uuid
+import os
 
 from pgvector.sqlalchemy import Vector
 
@@ -95,7 +96,14 @@ class DatabaseManager:
     Ref: 开发规范 - 三、数据库设计规范 - 2. 数据库操作要求
     """
     def __init__(self):
-        self.engine = create_async_engine(DATABASE_URL, echo=False, future=True)
+        db_timeout = int(os.getenv("DB_CONNECT_TIMEOUT_SEC", "3"))
+        self.engine = create_async_engine(
+            DATABASE_URL,
+            echo=False,
+            future=True,
+            pool_pre_ping=True,
+            connect_args={"timeout": db_timeout},
+        )
         self.async_session = sessionmaker(
             self.engine, class_=AsyncSession, expire_on_commit=False
         )

@@ -38,7 +38,7 @@ class RuleEngine:
             logger.warning(f"Rules file not found: {self.config_path}")
             self.rules = {}
 
-    async def load_rules_from_db(self):
+    async def load_rules_from_db(self) -> bool:
         """
         从数据库加载规则 (异步)
         覆盖 YAML 中的同名规则
@@ -58,6 +58,7 @@ class RuleEngine:
                 
                 logger.info(f"Loaded {len(rules)} rules from DB, total rules: {len(self.rules)}")
                 break # Close session
+            return True
         except Exception as e:
             if isinstance(e, ProgrammingError):
                 orig = getattr(e, "orig", None)
@@ -71,9 +72,10 @@ class RuleEngine:
                     or ("relation" in lowered and "does not exist" in lowered)
                 ) and ("agent_rules" in lowered):
                     logger.warning("Rules table missing in DB (agent_rules). Skipping DB rule loading and using YAML rules.")
-                    return
-            logger.error(f"Failed to load rules from DB: {e}")
+                    return False
+            logger.warning(f"Failed to load rules from DB: {e!r}")
             # Fallback to YAML is already done in __init__
+            return False
 
     def get_rule(self, module_name: str) -> Dict[str, Any]:
         """

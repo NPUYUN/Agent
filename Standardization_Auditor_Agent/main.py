@@ -51,11 +51,11 @@ async def lifespan(app: FastAPI):
     # await db_manager.engine.connect() # SQLAlchemy async engine is lazy
     
     # Load rules from DB (Task A: Dynamic Rule Loading)
-    try:
-        await rule_engine.load_rules_from_db()
+    loaded = await rule_engine.load_rules_from_db()
+    if loaded:
         logger.info("Rules loaded from DB successfully.")
-    except Exception as e:
-        logger.error(f"Failed to load rules from DB: {e}")
+    else:
+        logger.warning("Rules not loaded from DB; using YAML rules.")
 
     # Inject rules into core components
     layout_analyzer.update_rules(rule_engine.rules)
@@ -153,7 +153,7 @@ async def save_result_to_db(request: AuditRequest, response: AuditResponse | Non
             logger.info(f"Task {request.request_id} saved to DB (status={status}).")
             break
     except Exception as e:
-        logger.error(f"Failed to save task to DB: {e}")
+        logger.error(f"Failed to save task to DB: {type(e).__name__}: {e!r}")
 
 @app.post("/audit", response_model=AuditResponse, tags=["Audit"], summary="执行论文格式审计")
 async def audit_paper(request: AuditRequest):
@@ -184,7 +184,7 @@ async def audit_paper(request: AuditRequest):
                         content = section.content
                     break # Close session
             except Exception as e:
-                logger.error(f"Failed to fetch content from DB: {e}")
+                logger.error(f"Failed to fetch content from DB: {type(e).__name__}: {e!r}")
             
             if not content:
                 raise HTTPException(status_code=400, detail=f"Missing payload.content and no matching content found in DB for paper {request.metadata.paper_id} chunk {request.metadata.chunk_id}")
@@ -348,6 +348,7 @@ if __name__ == "__main__":
         import json
         import numpy as np
         import math
+        import re
         from datetime import datetime
 
         class NpEncoder(json.JSONEncoder):
@@ -362,12 +363,7 @@ if __name__ == "__main__":
 
         async def run_audit():
             # Load rules
-            try:
-                # Try loading from DB first
-                await rule_engine.load_rules_from_db()
-            except Exception:
-                # Fallback to loading from YAML if DB fails or not configured for CLI
-                pass
+            await rule_engine.load_rules_from_db()
             
             # Update components
             layout_analyzer.update_rules(rule_engine.rules)
@@ -496,12 +492,17 @@ if __name__ == "__main__":
                 
                 f.write("## 评分说明\n")
                 f.write("本系统采用非线性扣分机制，避免单一类问题导致分数过低：\n")
-                f.write("- **Critical**: 权重 5 (线性扣分)\n")
-                f.write("- **Warning**: 权重 2 (平方根非线性扣分)\n")
-                f.write("- **Info**: 权重 0.5 (平方根非线性扣分)\n\n")
+                scoring = getattr(semantic_checker, "rules", {}) or {}
+                scoring_cfg = scoring.get("scoring", {}) if isinstance(scoring, dict) else {}
+                critical_w = float(scoring_cfg.get("critical_weight", 5.0) or 5.0)
+                warning_w = float(scoring_cfg.get("warning_weight", 2.0) or 2.0)
+                info_w = float(scoring_cfg.get("info_weight", 0.5) or 0.5)
+                f.write(f"- **Critical**: 权重 {critical_w:g} (线性扣分)\n")
+                f.write(f"- **Warning**: 权重 {warning_w:g} (平方根非线性扣分)\n")
+                f.write(f"- **Info**: 权重 {info_w:g} (平方根非线性扣分)\n\n")
                 
-                deduction = 5 * critical + 2 * math.sqrt(warning) + 0.5 * math.sqrt(info)
-                f.write(f"**总扣分计算**: `5 * {critical} + 2 * sqrt({warning}) + 0.5 * sqrt({info})` ≈ `{deduction:.2f}`\n")
+                deduction = critical_w * critical + warning_w * math.sqrt(warning) + info_w * math.sqrt(info)
+                f.write(f"**总扣分计算**: `{critical_w:g} * {critical} + {warning_w:g} * sqrt({warning}) + {info_w:g} * sqrt({info})` ≈ `{deduction:.2f}`\n")
                 f.write(f"**最终得分**: `100 - {int(round(deduction))}` = `{score}`\n")
 
             # Generate Deduction Details Report
@@ -509,6 +510,37 @@ if __name__ == "__main__":
                 f.write(f"# 论文格式审计扣分细则\n\n")
                 f.write(f"**文件名**: {os.path.basename(pdf_path)}\n")
                 f.write(f"**生成时间**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+
+                def _norm_text(value: object) -> str:
+                    s = "" if value is None else str(value)
+                    s = re.sub(r"\s+", " ", s).strip()
+                    return s
+
+                def _fmt_bbox(bbox: object) -> str:
+                    if isinstance(bbox, (list, tuple)) and len(bbox) == 4:
+                        try:
+                            x0, y0, x1, y1 = [float(x) for x in bbox]
+                            return f"[{x0:.1f}, {y0:.1f}, {x1:.1f}, {y1:.1f}]"
+                        except Exception:
+                            return _norm_text(bbox)
+                    return ""
+
+                def _write_issue_detail(issue: dict):
+                    evidence = issue.get("evidence")
+                    bbox = issue.get("bbox")
+                    location = issue.get("location") if isinstance(issue.get("location"), dict) else {}
+                    if not bbox and isinstance(location, dict):
+                        bbox = location.get("bbox")
+                    bbox_str = _fmt_bbox(bbox)
+                    if bbox_str:
+                        f.write(f"- **BBox**: {bbox_str}\n")
+                    if evidence:
+                        ev = _norm_text(evidence)
+                        if ev:
+                            if len(ev) <= 120:
+                                f.write(f"- **证据**: `{ev}`\n")
+                            else:
+                                f.write(f"- **证据**:\n\n```\n{ev}\n```\n")
                 
                 if not all_issues:
                     f.write("恭喜！未发现明显的格式问题。\n")
@@ -534,6 +566,8 @@ if __name__ == "__main__":
                                 
                                 f.write(f"#### {i+1}. [Page {pg}] {msg}\n")
                                 f.write(f"- **严重程度**: {severity}\n")
+                                if isinstance(issue, dict):
+                                    _write_issue_detail(issue)
                                 if suggestion:
                                     f.write(f"- **修改建议**: {suggestion}\n")
                                 f.write("\n")
@@ -561,6 +595,8 @@ if __name__ == "__main__":
                                 
                                 f.write(f"#### {i+1}. [Page {pg}] {msg}\n")
                                 f.write(f"- **严重程度**: {severity}\n")
+                                if isinstance(issue, dict):
+                                    _write_issue_detail(issue)
                                 if suggestion:
                                     f.write(f"- **修改建议**: {suggestion}\n")
                                 f.write("\n")

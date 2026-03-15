@@ -19,7 +19,7 @@ def is_caption(text: str) -> bool:
     # Relaxed rule: Allow standalone caption numbers (e.g. "图 2.2")
     # if re.fullmatch(r"(图|表|Figure|Fig\.|Table)\s*\d+(?:[.-]\d+)*\.?", t, re.IGNORECASE):
     #     return False
-    m = re.match(r"^(图|表|Figure|Fig\.|Table)\s*\d+(?:[.-]\d+)*", t, re.IGNORECASE)
+    m = re.match(r"^(图|表|Figure|Fig\.|Table)\s*\d+(?:\s*[-.−–—－]\s*\d+)*", t, re.IGNORECASE)
     if not m:
         return False
     rest = t[m.end():].strip()
