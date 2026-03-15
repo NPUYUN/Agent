@@ -145,8 +145,30 @@ class PDFParser:
     def _parse_sync(self, content: Any) -> Dict[str, Any]:
         parse_errors = []
         parse_report = ParseReport()
+        page_set = None
+        pdf_payload = content
+        if isinstance(content, dict):
+            pdf_payload = (
+                content.get("pdf_path")
+                or content.get("pdf")
+                or content.get("path")
+                or content.get("content")
+            )
+            pages = content.get("pages") or content.get("page_nums") or content.get("page_numbers")
+            if pages:
+                try:
+                    page_set = {int(p) for p in pages if int(p) > 0}
+                except Exception:
+                    page_set = None
+        elif isinstance(content, (tuple, list)) and len(content) == 2:
+            pdf_payload, pages = content[0], content[1]
+            if pages:
+                try:
+                    page_set = {int(p) for p in pages if int(p) > 0}
+                except Exception:
+                    page_set = None
         try:
-            doc = open_pdf(content)
+            doc = open_pdf(pdf_payload)
         except Exception as exc:
             parse_errors.append(ParseError(error_type="invalid_pdf", message=str(exc)).model_dump())
             return {"elements": [], "parse_errors": parse_errors, "parse_report": parse_report.model_dump()}
@@ -159,6 +181,8 @@ class PDFParser:
         for page_index in range(len(doc)):
             page = doc[page_index]
             page_num = page_index + 1
+            if page_set is not None and page_num not in page_set:
+                continue
             page_rect = page.rect
             scanned = is_scanned_page(page)
             if scanned:
@@ -659,7 +683,8 @@ class VisualValidator:
                 img_content = (getattr(img, "content", "") or "").strip()
                 
                 # Check for sub-figure labels (e.g. "(a)", "a)", "(b)")
-                if len(img_content) < 10 and re.match(r"^(\(?[a-z]\)?|[a-z]\.)$", img_content, re.IGNORECASE):
+                if re.match(r"^(\(?[a-z]\)?|[a-z]\.)\s", img_content, re.IGNORECASE) or \
+                   (len(img_content) < 10 and re.match(r"^(\(?[a-z]\)?|[a-z]\.)$", img_content, re.IGNORECASE)):
                     continue
 
                 if len(img_content) > 50:
@@ -668,23 +693,29 @@ class VisualValidator:
                         continue
 
                 # Check for overlapping text elements (misclassified text region)
-                overlapping_text_len = 0
-                for e in page_elements:
-                    if getattr(e, "type", "") == "text" and getattr(e, "bbox", None):
-                        # Calculate intersection area
-                        ix0 = max(img.bbox[0], e.bbox[0])
-                        iy0 = max(img.bbox[1], e.bbox[1])
-                        ix1 = min(img.bbox[2], e.bbox[2])
-                        iy1 = min(img.bbox[3], e.bbox[3])
-                        if ix1 > ix0 and iy1 > iy0:
-                            # If significant overlap (e.g. text is mostly inside image)
-                            text_area = (e.bbox[2] - e.bbox[0]) * (e.bbox[3] - e.bbox[1])
-                            intersect_area = (ix1 - ix0) * (iy1 - iy0)
-                            if intersect_area > text_area * 0.5:
-                                overlapping_text_len += len((getattr(e, "content", "") or "").strip())
-                
-                if overlapping_text_len > 50:
-                     continue
+                # try:
+                #     if not (img.bbox and len(img.bbox) == 4):
+                #         continue
+                #     overlapping_text_len = 0
+                #     for e in page_elements:
+                #         if getattr(e, "type", "") == "text" and getattr(e, "bbox", None) and len(e.bbox) == 4:
+                #             # Calculate intersection area
+                #             ix0 = max(img.bbox[0], e.bbox[0])
+                #             iy0 = max(img.bbox[1], e.bbox[1])
+                #             ix1 = min(img.bbox[2], e.bbox[2])
+                #             iy1 = min(img.bbox[3], e.bbox[3])
+                #             if ix1 > ix0 and iy1 > iy0:
+                #                 # If significant overlap (e.g. text is mostly inside image)
+                #                 text_area = (e.bbox[2] - e.bbox[0]) * (e.bbox[3] - e.bbox[1])
+                #                 if text_area > 0:
+                #                     intersect_area = (ix1 - ix0) * (iy1 - iy0)
+                #                     if intersect_area > text_area * 0.5:
+                #                         overlapping_text_len += len((getattr(e, "content", "") or "").strip())
+                #     
+                #     if overlapping_text_len > 50:
+                #          continue
+                # except Exception:
+                #     pass
 
                 if img.bbox[3] <= float(max_y) * 0.12:
                     continue
@@ -777,6 +808,7 @@ class VisualValidator:
         check_reference = bool(rule_config.get("check_reference", False))
         unref_ratio_threshold = float(rule_config.get("unreferenced_ratio_threshold", 0.0) or 0.0)
         min_unref_count = int(rule_config.get("min_unreferenced_count", 0) or 0)
+        missing_severity = rule_config.get("missing_severity", "Warning")
         num_pat = r"\d+(?:\s*[-.−–—－]\s*\d+)*"
         dash_chars = "−–—－"
 
@@ -858,6 +890,22 @@ class VisualValidator:
                 return False
             if len(s) <= 6:
                 return False
+            # Exclude scientific notation like "5 × 102" or "1.28 × 106"
+            if re.fullmatch(r"[\d\.]+\s*[×xX*]\s*10\s*[-−]?\d+", s):
+                return False
+            # Exclude simple assignment or property access like "T=0.2" or "H=0.85"
+            if re.fullmatch(r"[A-Za-z]+\s*=\s*[\d\.]+", s):
+                return False
+            # Exclude simple numbers with units or simple arithmetic
+            if re.fullmatch(r"[\d\.]+\s*[+\-−–—]\s*[\d\.]+", s):
+                return False
+            # Exclude trailing assignments without complex formula features (e.g. "布，H=0.85")
+            if re.search(r"[\u4e00-\u9fff]\s*[,，]?\s*[A-Za-z]+\s*=\s*[\d\.]+$", s):
+                return False
+            # Exclude Chinese text that might end up with weird math-like symbols due to OCR or parsing
+            if "，" in s or "。" in s or "、" in s or "：" in s:
+                return False
+            
             if re.search(r"[=<>≤≥±×÷*/+\-≈≠]", s):
                 return True
             if re.search(r"[∑∫√∂∇∞]", s):
@@ -946,7 +994,7 @@ class VisualValidator:
                     issues.append(
                         {
                             "issue_type": "Formula_Missing",
-                            "severity": "Warning",
+                            "severity": missing_severity,
                             "page_num": f.page_num,
                             "bbox": f.bbox,
                             "evidence": f.content,

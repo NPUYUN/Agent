@@ -335,6 +335,10 @@ if __name__ == "__main__":
     )
     parser.add_argument("--pdf", help="本地 PDF 文件路径（启用 CLI 审计模式）")
     parser.add_argument(
+        "--pages",
+        help="仅审计指定页码（可用逗号分隔与范围）：例如 1,2,10-12。默认：审计全部页",
+    )
+    parser.add_argument(
         "--output",
         help="输出路径：目录或 .json 文件路径。\n"
              "- 目录：Markdown 报告输出到该目录\n"
@@ -361,6 +365,37 @@ if __name__ == "__main__":
                     return obj.tolist()
                 return super().default(obj)
 
+        def _parse_pages_spec(spec: str | None) -> list[int] | None:
+            if not spec:
+                return None
+            raw = str(spec).strip()
+            if not raw:
+                return None
+            out: set[int] = set()
+            for part in re.split(r"[,\s]+", raw):
+                p = part.strip()
+                if not p:
+                    continue
+                if "-" in p:
+                    a, b = (x.strip() for x in p.split("-", 1))
+                    if not a.isdigit() or not b.isdigit():
+                        continue
+                    start, end = int(a), int(b)
+                    if start <= 0 or end <= 0:
+                        continue
+                    if end < start:
+                        start, end = end, start
+                    for n in range(start, end + 1):
+                        out.add(n)
+                    continue
+                if p.isdigit():
+                    n = int(p)
+                    if n > 0:
+                        out.add(n)
+            if not out:
+                return None
+            return sorted(out)
+
         async def run_audit():
             # Load rules
             await rule_engine.load_rules_from_db()
@@ -375,17 +410,23 @@ if __name__ == "__main__":
                 return
 
             print(f"Starting audit for: {pdf_path}")
+            selected_pages = _parse_pages_spec(args.pages)
+            selected_set = set(selected_pages or [])
             
             # 1. Extract text
             doc = fitz.open(pdf_path)
             text_content = ""
-            for page in doc:
+            for idx, page in enumerate(doc):
+                page_num = idx + 1
+                if selected_pages and page_num not in selected_set:
+                    continue
                 text_content += page.get_text()
             
             # 2. Layout Analysis
             print("Running Layout Analysis...")
             try:
-                layout_data = await asyncio.wait_for(layout_analyzer.analyze(pdf_path), timeout=LAYOUT_ANALYSIS_TIMEOUT)
+                layout_input = {"pdf_path": pdf_path, "pages": selected_pages} if selected_pages else pdf_path
+                layout_data = await asyncio.wait_for(layout_analyzer.analyze(layout_input), timeout=LAYOUT_ANALYSIS_TIMEOUT)
             except asyncio.TimeoutError:
                 layout_data = {
                     "elements": [],

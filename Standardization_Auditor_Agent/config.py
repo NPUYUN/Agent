@@ -28,8 +28,8 @@ DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 DEEPSEEK_MODEL_NAME = os.getenv("DEEPSEEK_MODEL_NAME", "deepseek-chat")
 
-# LLM Provider: "gemini", "qwen" or "deepseek"
-LLM_PROVIDER = os.getenv("LLM_PROVIDER", "deepseek")
+# LLM Provider: "gemini", "qwen", "deepseek" or "mock"
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "mock")
 LLM_TIMEOUT_SEC = int(os.getenv("LLM_TIMEOUT_SEC", "60"))
 
 # RAG / Embedding 配置

@@ -514,7 +514,7 @@ class PunctuationChecker:
                         continue
                     if self.allow_keywords_colon and re.match(r"^(key\\s*words|keywords|abstract)\\s*：", seg_strip, flags=re.IGNORECASE):
                         continue
-                    if self.allow_proof_dot and re.match(r"^(证明|定理|引理|推论|命题|定义|注|例)\\s*\\.", seg_strip):
+                    if self.allow_proof_dot and re.match(r"^(证明|定理|引理|推论|命题|定义|注|例|已知|求|解|假设)\s*[.:]", seg_strip):
                         continue
                     cjk_count = len(re.findall(r"[\u4e00-\u9fff]", segment))
                     en_count = len(re.findall(r"[A-Za-z]", segment))
@@ -525,7 +525,14 @@ class PunctuationChecker:
                     for m in cn_en_punct_pattern.finditer(segment):
                         if cjk_ratio < 0.5:
                             continue
-                        if self.allow_proof_dot and segment[max(0, m.start()-6):m.end()].strip().endswith(("证明.", "定理.", "引理.", "推论.", "命题.", "定义.", "注.", "例.")):
+                        if self.allow_proof_dot and segment[max(0, m.start()-6):m.end()].strip().endswith(("证明.", "定理.", "引理.", "推论.", "命题.", "定义.", "注.", "例.", "已知:", "求:", "解:", "假设:")):
+                            continue
+                        # Exclude English punctuation if it's right after English words or numbers
+                        if m.start() > 0 and re.match(r"[A-Za-z0-9]", segment[m.start()-1]):
+                            # Like "GSM8K," or "T=0.2,"
+                            continue
+                        punct = segment[m.end() - 1] if m.end() > 0 else ""
+                        if punct == "," and re.match(r"^\s*[A-Za-z][A-Za-z0-9_]*\s*=\s*[-+]?\d", segment[m.end():] or ""):
                             continue
                         issues.append({
                             "issue_type": "Punctuation_Mixed",
@@ -538,7 +545,7 @@ class PunctuationChecker:
                     for m in cn_en_dot_pattern.finditer(segment):
                         if cjk_ratio < 0.5:
                             continue
-                        if self.allow_proof_dot and segment[max(0, m.start()-6):m.end()].strip().endswith(("证明.", "定理.", "引理.", "推论.", "命题.", "定义.", "注.", "例.")):
+                        if self.allow_proof_dot and segment[max(0, m.start()-6):m.end()].strip().endswith(("证明.", "定理.", "引理.", "推论.", "命题.", "定义.", "注.", "例.", "已知:", "求:", "解:", "假设:")):
                             continue
                         issues.append({
                             "issue_type": "Punctuation_Mixed",
@@ -550,6 +557,11 @@ class PunctuationChecker:
 
                     for m in en_cn_punct_pattern.finditer(segment):
                         if en_ratio < 0.8 or en_count < 5:
+                            continue
+                        
+                        # Exclude Chinese punctuation if it's right after Chinese characters
+                        # e.g., in a mixed sentence where English is dominant but there's a Chinese word followed by Chinese punctuation
+                        if m.start() > 0 and re.match(r"[\u4e00-\u9fff]", segment[m.start()-1]):
                             continue
                         
                         # Skip if single word (no spaces) - likely a term in a list

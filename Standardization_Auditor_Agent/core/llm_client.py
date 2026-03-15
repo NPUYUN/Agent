@@ -2,6 +2,7 @@ from google import genai
 from google.genai import types
 from openai import AsyncOpenAI
 from typing import Optional
+import json
 from utils.logger import setup_logger
 from config import (
     GEMINI_MODEL_NAME, GOOGLE_API_KEY,
@@ -54,6 +55,9 @@ class LLMClient:
                 )
             self.model_name = DEEPSEEK_MODEL_NAME
 
+        elif self.provider == "mock":
+            pass # No client needed
+
         else:
             self.provider = "none"
 
@@ -67,8 +71,41 @@ class LLMClient:
             return await self._scan_with_qwen(content, temperature)
         elif self.provider == "deepseek":
             return await self._scan_with_deepseek(content, temperature)
+        elif self.provider == "mock":
+            return await self._scan_with_mock(content, temperature)
         else:
             return ""
+
+    async def _scan_with_mock(self, content: str, temperature: float = 0.1) -> str:
+        """
+        Mock LLM response for testing purposes.
+        """
+        import asyncio
+        await asyncio.sleep(0.5)
+        # Return a valid JSON string simulating issues found by LLM
+        # Based on keywords in content to make it semi-realistic
+        issues = []
+        
+        # Check for terminology issues (simple keyword check)
+        if "LLM" in content and "Large Language Model" not in content:
+            issues.append({
+                "issue_type": "Terminology_Inconsistency",
+                "severity": "Info",
+                "evidence": "LLM",
+                "message": "术语 'LLM' 建议在首次出现时使用全称 'Large Language Model (LLM)'",
+                "suggestion": "Large Language Model (LLM)"
+            })
+
+        if "e.g." in content:
+            issues.append({
+                "issue_type": "Abbreviation_Definition",
+                "severity": "Info",
+                "evidence": "e.g.",
+                "message": "建议使用 '例如' 或 'for example' 代替拉丁缩写",
+                "suggestion": "例如"
+            })
+            
+        return json.dumps({"issues": issues, "summary": "Mock LLM scan completed."}, ensure_ascii=False)
 
     async def generate_text(
         self,
