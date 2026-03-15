@@ -43,7 +43,13 @@ def is_formula_text(text: str) -> bool:
     stripped = text.strip()
     if len(stripped) > 160:
         return False
+    if re.search(r"[。！？]\s*$", stripped):
+        return False
+    if "。" in stripped and len(stripped) > 25:
+        return False
     if re.search(r"[\.·…]{5,}\s*\d+\s*$", stripped):
+        return False
+    if re.search(r"[\u4e00-\u9fff]\s*/\s*[\u4e00-\u9fff]", stripped):
         return False
     
     # Exclude C-style code endings or block starts
@@ -99,8 +105,15 @@ def is_formula_text(text: str) -> bool:
     # ≤, ≥, ≠, ≈, ±, ×, ÷, ∑, ∫, √, α-ω, ∂, ∇, ∞
     if re.search(r"[∑∫√≈≠≤≥±×÷α-ωΑ-Ω∂∇∞]", text):
         cn = len(re.findall(r"[\u4e00-\u9fff]", text))
-        if cn / max(len(stripped), 1) > 0.2 and not re.search(r"[=<>≤≥±×÷*/+\-≈≠]", text):
-            return False
+        cn_ratio = cn / max(len(stripped), 1)
+        op_count = len(re.findall(r"[=<>≤≥±×÷*/+\-≈≠]", text))
+        if cn_ratio > 0.2:
+            if "。" in stripped:
+                return False
+            if len(stripped) > 35:
+                return False
+            if op_count < 2 and not re.search(r"\s*=\s*", text):
+                return False
         return True
     
     # Standard formula numbering at end

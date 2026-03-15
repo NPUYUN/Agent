@@ -508,27 +508,92 @@ class VisualValidator:
         numbering_pos = rule_config.get("numbering", "right")
         require_numbering = bool(rule_config.get("require_numbering", False))
         check_reference = bool(rule_config.get("check_reference", False))
+        num_pat = r"\d+(?:\s*[-.−–—－]\s*\d+)*"
+        dash_chars = "−–—－"
+
+        def _norm_num(n: str) -> str:
+            if not n:
+                return ""
+            s = re.sub(r"\s+", "", str(n))
+            for ch in dash_chars:
+                s = s.replace(ch, "-")
+            if re.fullmatch(r"\d+(?:-\d+)+", s):
+                s = s.replace("-", ".")
+            return s
 
         def _is_display_formula(text: str) -> bool:
             s = (text or "").strip()
             if not s:
                 return False
-            if re.search(r"(（|\()(\d+(?:[.-]\d+)*)(）|\))\s*$", s):
+            if re.search(rf"(（|\()({num_pat})(）|\))\s*$", s):
                 return True
+            if ":=" in s:
+                return False
+            if re.search(r"[；;。;]\s*$", s):
+                return False
+            if re.search(r"[\(\[（【\{⟨<]\s*$", s):
+                return False
+            if re.match(r"^\s*\d+\s*:\s*\S", s):
+                return False
+            if re.match(r"^\s*\d+\)\s+\S", s):
+                return False
+            if re.match(r"^\s*\d+\s*且\s+\S", s):
+                return False
+            if re.match(r"^[^\d\s\(\)【】\[\]\{\}<>]{1,2}\s*[:：]\s*\S", s):
+                return False
+            if re.search(r"[∧∨¬⇒⇔]", s):
+                return False
+            if re.search(r"(其中|定义|我们|令|则|即|表示)", s):
+                return False
+            if re.fullmatch(r"!\([^)]*\)", s):
+                return False
+            if re.fullmatch(r"\[\s*!\([^)]*\)\s*\]", s):
+                return False
+            if "⟨" in s and "⟩" not in s:
+                return False
+            if "⟩" in s and "⟨" not in s:
+                return False
+            if "{" in s and "}" not in s:
+                return False
+            if "}" in s and "{" not in s:
+                return False
+            if re.search(r"⟨[^⟩]+⟩", s) and "," in s:
+                return False
+            if "←" in s:
+                return False
+            if re.match(r"^\s*算法\s*\d", s):
+                return False
+            if "。" in s:
+                return False
+            if "˙" in s:
+                return False
             # Exclude likely code patterns
             if re.search(r"(\[\]|\{\}|return\s|def\s|class\s|import\s|print\()", s):
                 return False
             if re.search(r"[=<>≤≥±×÷*/+\-≈≠]\s*$", s):
                 return False
+            cn = len(re.findall(r"[\u4e00-\u9fff]", s))
+            if cn / max(len(s), 1) > 0.15:
+                return False
+            if "," in s and s.count("=") >= 2 and not re.search(r"[∧∨¬⇒⇔∑∫√]", s):
+                parts = [p.strip() for p in re.split(r"[,，]", s) if p.strip()]
+                if len(parts) >= 2 and all("=" in p for p in parts):
+                    return False
+            if re.fullmatch(r"\S+\s*(?:≤|≥|<|>)\s*\S+(?:\s*[+\-−–—]\s*\d+(?:\.\d+)?)?", s):
+                return False
+            if re.fullmatch(r"[A-Za-zα-ωΑ-Ω]\w{0,3}\s*[≤≥<>]=?\s*-?\d+(?:\.\d+)?", s):
+                return False
             if re.fullmatch(r"[A-Za-zα-ωΑ-Ω]\w{0,2}", s):
                 return False
             if re.fullmatch(r"[∑∫√α-ωΑ-Ω∂∇∞≈≠≤≥±×÷]", s):
                 return False
-            if len(s) <= 4 and not re.search(r"[=<>≤≥±×÷*/+\-≈≠]", s):
+            if len(s) <= 6:
                 return False
             if re.search(r"[=<>≤≥±×÷*/+\-≈≠]", s):
                 return True
-            if len(s) >= 12 and re.search(r"[\dA-Za-zα-ωΑ-Ω]", s):
+            if re.search(r"[∑∫√∂∇∞]", s):
+                return True
+            if re.search(r"(\\[a-zA-Z]+|\^|\{.*\})", s):
                 return True
             return False
 
@@ -536,16 +601,23 @@ class VisualValidator:
         if not formulas:
             return issues
         page_max_x = {}
+        page_max_y = {}
         for e in elements:
             page_max_x[e.page_num] = max(page_max_x.get(e.page_num, 0), e.bbox[2])
+            page_max_y[e.page_num] = max(page_max_y.get(e.page_num, 0), e.bbox[3])
         text_refs = [e for e in elements if e.type == "text"]
         ref_nums = set()
         for t in text_refs:
-            for m in re.finditer(r"(?:式|公式)\s*(?:（|\()?\s*(\d+(?:[.-]\d+)*)\s*(?:）|\))?", t.content):
-                ref_nums.add(m.group(1))
-            for m in re.finditer(r"(?:Eq\.?|Equation)\s*(?:\(|（)?\s*(\d+(?:[.-]\d+)*)\s*(?:\)|）)?", t.content, flags=re.IGNORECASE):
-                ref_nums.add(m.group(1))
-        num_only_pat = re.compile(r"^\s*(?:（|\()(\d+(?:[.-]\d+)*)(?:）|\))\s*$")
+            for m in re.finditer(rf"(?:式|公式)\s*(?:（|\()?\s*({num_pat})\s*(?:）|\))?", t.content):
+                ref_nums.add(_norm_num(m.group(1)))
+            for m in re.finditer(rf"(?:Eq\.?|Equation)\s*(?:\(|（)?\s*({num_pat})\s*(?:\)|）)?", t.content, flags=re.IGNORECASE):
+                ref_nums.add(_norm_num(m.group(1)))
+            for m in re.finditer(rf"(?:（|\()({num_pat})(?:）|\))", t.content):
+                raw = m.group(1)
+                if not re.search(r"[-.−–—－]", raw):
+                    continue
+                ref_nums.add(_norm_num(raw))
+        num_only_pat = re.compile(rf"^\s*(?:（|\()({num_pat})(?:）|\))\s*$")
         page_num_only = {}
         for e in elements:
             if e.type not in {"text", "title", "formula"}:
@@ -553,13 +625,13 @@ class VisualValidator:
             m = num_only_pat.match(e.content or "")
             if not m:
                 continue
-            page_num_only.setdefault(e.page_num, []).append((e, m.group(1)))
+            page_num_only.setdefault(e.page_num, []).append((e, _norm_num(m.group(1))))
         for f in formulas:
             num = None
             num_bbox: Optional[List[float]] = None
-            m_end = re.search(r"(（|\()(\d+(?:[.-]\d+)*)(）|\))\s*$", f.content)
+            m_end = re.search(rf"(（|\()({num_pat})(）|\))\s*$", f.content)
             if m_end:
-                num = m_end.group(2)
+                num = _norm_num(m_end.group(2))
                 num_bbox = f.bbox
             else:
                 # Fallback: check if the number is at the beginning (left-aligned case) or just separated
@@ -582,7 +654,10 @@ class VisualValidator:
                         if numbering_pos == "right":
                             if e.bbox[0] < f.bbox[2] - 4:
                                 continue
-                            if e.bbox[2] < max_x * 0.75:
+                            max_y = page_max_y.get(f.page_num, 842.0) or 842.0
+                            if e.bbox[1] <= max_y * 0.08 or e.bbox[3] >= max_y * 0.96:
+                                continue
+                            if e.bbox[2] < max_x * 0.85:
                                 continue
                         elif numbering_pos == "left":
                             if e.bbox[2] > f.bbox[0] + 4:
@@ -593,7 +668,7 @@ class VisualValidator:
                             best = num
                             best_bbox = e.bbox
                     if best is not None:
-                        num = best
+                        num = _norm_num(best)
                         num_bbox = best_bbox
             
             if not num:

@@ -61,6 +61,6 @@ formula_check:
   check_reference: true            # 是否检查公式编号在正文中被引用
 
 llm_scan:
-  enabled: false
+  enabled: true
   max_text_chars: 60000
   max_chunks: 2
