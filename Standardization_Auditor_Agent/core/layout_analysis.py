@@ -66,6 +66,75 @@ def _find_citations(text: str) -> List[str]:
     return matches
 
 
+def _is_toc_like_heading(text: str) -> bool:
+    t = (text or "").strip()
+    if not t:
+        return False
+    if re.search(r"(?:\.{3,}|…{2,}|·{3,}|_{3,}|-{5,})\s*\d+\s*$", t):
+        return True
+    if re.search(r"(?:\.{2,}|…{2,})", t) and re.search(r"\s{2,}\d+\s*$", t):
+        return True
+    return False
+
+
+def _cn_number_to_int(s: str) -> Optional[int]:
+    t = (s or "").strip()
+    if not t:
+        return None
+    if t.isdigit():
+        try:
+            return int(t)
+        except Exception:
+            return None
+    digits = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+    units = {"十": 10, "百": 100, "千": 1000}
+    section = 0
+    number = 0
+    seen = False
+    for ch in t:
+        if ch in digits:
+            number = digits[ch]
+            seen = True
+            continue
+        if ch in units:
+            unit = units[ch]
+            if number == 0:
+                number = 1
+            section += number * unit
+            number = 0
+            seen = True
+            continue
+        return None
+    if not seen:
+        return None
+    val = section + number
+    return val if val > 0 else None
+
+
+def _parse_heading_parts(text: str) -> Optional[List[int]]:
+    t = (text or "").strip()
+    if not t:
+        return None
+    m = re.match(r"^\s*(\d+(?:\.\d+)*)(?:[.、]|\s+)", t)
+    if m:
+        rest = t[m.end():].strip()
+        if len(rest) < 2:
+            return None
+        if not re.search(r"[A-Za-z\u4e00-\u9fff]", rest):
+            return None
+        try:
+            return [int(x) for x in (m.group(1) or "").split(".") if x.strip().isdigit()]
+        except Exception:
+            return None
+    m = re.match(r"^第([0-9一二三四五六七八九十百千两零]+)[章节]", t)
+    if m:
+        n = _cn_number_to_int(m.group(1))
+        if n is None:
+            return None
+        return [n]
+    return None
+
+
 class PDFParser:
     def __init__(self):
         pass
@@ -275,19 +344,25 @@ class VisualValidator:
         rule_config = self.rules.get("figure_table_check", {})
         fig_caption_pos = rule_config.get("caption_requirement", "bottom")
         table_caption_pos = rule_config.get("table_caption_requirement", "top")
+        min_figure_area_ratio = float(rule_config.get("min_figure_area_ratio", 0.03))
 
-        # Collect captions from both 'chart' type elements and 'title' elements that look like captions
+        caption_num_pat = re.compile(r"^\s*(?:图|表|Figure|Fig\.?|Table)\s*([0-9]+(?:[.-][0-9]+)*)", flags=re.IGNORECASE)
+        ref_pat = re.compile(r"(?:如|见|参见|详见)?\s*(?:图|表|Figure|Fig\.?|Table)\s*([0-9]+(?:[.-][0-9]+)*)", flags=re.IGNORECASE)
+        figure_caption_pat = re.compile(r"^\s*(?:图|Figure|Fig\.?)\s*", flags=re.IGNORECASE)
+        table_caption_pat = re.compile(r"^\s*(?:表|Table)\s*", flags=re.IGNORECASE)
+
         captions = [e for e in elements if (e.type == "chart") or (e.type == "title" and is_caption(e.content))]
         images = [e for e in elements if e.type == "image"]
-        text_refs = [e for e in elements if e.type == "text"]
+        text_refs = [e for e in elements if e.type == "text" and (getattr(e, "region", "") or "") != "reference"]
         caption_nums = set()
         for c in captions:
-            m = re.match(r"^(图|表)\s*(\d+(?:[.-]\d+)*)", c.content)
-            if m:
-                caption_nums.add(m.group(2))
+            m = caption_num_pat.match(c.content or "")
+            if m and m.group(1):
+                caption_nums.add(m.group(1))
         for t in text_refs:
-            for m in re.finditer(r"见(?:图|表)\s*(\d+(?:[.-]\d+)*)", t.content):
-                if m.group(1) not in caption_nums:
+            for m in ref_pat.finditer(t.content or ""):
+                ref_num = (m.group(1) or "").strip()
+                if ref_num and ref_num not in caption_nums:
                     issues.append(
                         {
                             "issue_type": "Label_Missing",
@@ -299,17 +374,23 @@ class VisualValidator:
                             "location": {"page": t.page_num, "bbox": t.bbox}
                         }
                     )
+
+        captions_by_page: Dict[int, List[VisualElement]] = {}
         for c in captions:
-            # Skip check for Tables if they are not represented as images
-            is_figure = bool(re.match(r"^(图|Figure|Fig\.)", c.content, re.IGNORECASE))
-            is_table = bool(re.match(r"^(表|Table)", c.content, re.IGNORECASE))
+            captions_by_page.setdefault(int(getattr(c, "page_num", 0) or 0), []).append(c)
+        has_any_figure_caption = any(figure_caption_pat.match(c.content or "") for c in captions)
+
+        images_by_page: Dict[int, List[VisualElement]] = {}
+        for img in images:
+            images_by_page.setdefault(int(getattr(img, "page_num", 0) or 0), []).append(img)
+
+        for c in captions:
+            is_figure = bool(figure_caption_pat.match(c.content or ""))
+            is_table = bool(table_caption_pat.match(c.content or ""))
             
             same_page_images = [i for i in images if i.page_num == c.page_num]
             
-            # For figures, we expect an image nearby.
             if is_figure:
-                # Disabled image check because PyMuPDF often misses vector graphics (drawings),
-                # leading to false positives "Image not found".
                 if not same_page_images:
                     continue
                 
@@ -318,14 +399,10 @@ class VisualValidator:
                     key=lambda i: abs(i.bbox[1] - c.bbox[1]),
                 )
                 
-                # Check distance: If nearest image is too far (e.g., > 1/3 page height), 
-                # assume the actual image was not detected (Info) instead of Warning about position.
-                # Estimate page height from max y on page (default A4 height ~842)
                 page_elements = [e for e in elements if e.page_num == c.page_num]
                 max_y = max((e.bbox[3] for e in page_elements), default=842.0)
                 
                 if abs(nearest.bbox[1] - c.bbox[1]) > max_y * 0.33:
-                    # Skip reporting if too far, assuming unrelated image
                     continue
                 
                 overlap = min(c.bbox[2], nearest.bbox[2]) - max(c.bbox[0], nearest.bbox[0])
@@ -335,8 +412,6 @@ class VisualValidator:
                 if overlap < min_w * 0.25:
                     continue
 
-                # Check position (Bottom) with tolerance
-                # Tolerance allows for slight overlaps or bounding box inaccuracies
                 tolerance = 5.0
                 if fig_caption_pos == "bottom" and c.bbox[1] < nearest.bbox[1] - tolerance:
                      issues.append({
@@ -359,10 +434,72 @@ class VisualValidator:
                         "location": {"page": c.page_num, "bbox": c.bbox}
                     })
 
-            # For tables, we usually don't have "image" objects for them, so we skip image matching.
-            # Only check position if we can identify table body (not implemented yet), so just skip Label_Missing for tables.
             if is_table:
-                pass # TODO: Implement table body detection for position check
+                pass
+
+        if not has_any_figure_caption:
+            return issues
+
+        for page_num, page_images in images_by_page.items():
+            page_elements = [e for e in elements if e.page_num == page_num]
+            if any(getattr(e, "type", "") == "scanned_content" for e in page_elements):
+                continue
+            max_x = max((e.bbox[2] for e in page_elements if getattr(e, "bbox", None)), default=595.0)
+            max_y = max((e.bbox[3] for e in page_elements if getattr(e, "bbox", None)), default=842.0)
+            page_area = max(1.0, float(max_x) * float(max_y))
+            page_captions = captions_by_page.get(page_num, [])
+            figure_captions = [c for c in page_captions if figure_caption_pat.match(c.content or "")]
+
+            for img in page_images:
+                iw = max(0.0, img.bbox[2] - img.bbox[0])
+                ih = max(0.0, img.bbox[3] - img.bbox[1])
+                img_area_ratio = (iw * ih) / page_area
+                if img_area_ratio < min_figure_area_ratio:
+                    continue
+                if img_area_ratio > 0.85:
+                    continue
+                if not figure_captions:
+                    issues.append(
+                        {
+                            "issue_type": "Label_Missing",
+                            "severity": "Info",
+                            "page_num": img.page_num,
+                            "bbox": img.bbox,
+                            "evidence": "",
+                            "message": "检测到图片但未找到图标题",
+                            "location": {"page": img.page_num, "bbox": img.bbox},
+                        }
+                    )
+                    continue
+
+                best = None
+                best_score = None
+                for c in figure_captions:
+                    overlap = min(c.bbox[2], img.bbox[2]) - max(c.bbox[0], img.bbox[0])
+                    if overlap <= 0:
+                        continue
+                    min_w = min(max(1.0, c.bbox[2] - c.bbox[0]), max(1.0, img.bbox[2] - img.bbox[0]))
+                    if overlap < min_w * 0.2:
+                        continue
+                    dy = abs(c.bbox[1] - img.bbox[1])
+                    if dy > max_y * 0.25:
+                        continue
+                    score = dy * 1000.0 + abs((c.bbox[0] + c.bbox[2]) / 2.0 - (img.bbox[0] + img.bbox[2]) / 2.0)
+                    if best_score is None or score < best_score:
+                        best_score = score
+                        best = c
+                if best is None:
+                    issues.append(
+                        {
+                            "issue_type": "Label_Missing",
+                            "severity": "Info",
+                            "page_num": img.page_num,
+                            "bbox": img.bbox,
+                            "evidence": "",
+                            "message": "检测到图片但未找到图标题",
+                            "location": {"page": img.page_num, "bbox": img.bbox},
+                        }
+                    )
         return issues
 
     def _check_formulas(self, elements: List[VisualElement]) -> List[Dict[str, Any]]:
@@ -528,14 +665,41 @@ class VisualValidator:
         column_threshold = float(rule_config.get("column_threshold", 200.0))
 
         titles = [e for e in elements if e.type == "title" and e.region == "title"]
+        title_text_counts: Dict[str, int] = {}
+        for t in titles:
+            key = re.sub(r"\s+", "", (t.content or "")).strip()
+            if not key:
+                continue
+            title_text_counts[key] = title_text_counts.get(key, 0) + 1
+        chapter_only_pat = re.compile(r"^第[0-9一二三四五六七八九十百千两零]+章$")
+        page_max_y: Dict[int, float] = {}
+        for e in elements:
+            if not getattr(e, "bbox", None):
+                continue
+            page_max_y[e.page_num] = max(page_max_y.get(e.page_num, 0.0), float(e.bbox[3]))
+        titles = sorted(
+            titles,
+            key=lambda e: (
+                int(getattr(e, "page_num", 0) or 0),
+                float((getattr(e, "bbox", None) or [0.0, 0.0, 0.0, 0.0])[1]),
+                float((getattr(e, "bbox", None) or [0.0, 0.0, 0.0, 0.0])[0]),
+            ),
+        )
         numbered = []
         for t in titles:
+            max_y = page_max_y.get(t.page_num, 842.0) or 842.0
+            if t.bbox[1] <= max_y * 0.08 or t.bbox[3] >= max_y * 0.95:
+                continue
+            compact = re.sub(r"\s+", "", (t.content or "")).strip()
+            if compact and title_text_counts.get(compact, 0) >= 3 and chapter_only_pat.match(compact):
+                continue
             if not is_heading_text(t.content):
                 continue
-            m = re.match(r"^\s*(\d+(?:\.\d+)*)(?:[.、]|\s+)", t.content.strip())
-            if not m:
+            if _is_toc_like_heading(t.content):
                 continue
-            parts = [int(x) for x in m.group(1).split(".")]
+            parts = _parse_heading_parts(t.content)
+            if not parts:
+                continue
             
             # Dynamic Rule Check: Max Depth
             if len(parts) > max_depth:
@@ -552,17 +716,56 @@ class VisualValidator:
                 )
 
             numbered.append((t, parts))
-        if continuity_check:
-            for i in range(1, len(numbered)):
-                prev, prev_parts = numbered[i - 1]
-                curr, curr_parts = numbered[i]
-                same_page = curr.page_num == prev.page_num
-                prev_cx = (prev.bbox[0] + prev.bbox[2]) / 2.0
-                curr_cx = (curr.bbox[0] + curr.bbox[2]) / 2.0
-                same_column = abs(curr_cx - prev_cx) < column_threshold
-                if not (same_page and same_column):
-                    continue
-                if len(curr_parts) > len(prev_parts) + 1:
+        seen_numbers: Dict[Tuple[int, ...], VisualElement] = {}
+        last_child_by_parent: Dict[Tuple[int, ...], int] = {}
+        prev_heading: Optional[Tuple[VisualElement, List[int]]] = None
+
+        for curr, curr_parts in numbered:
+            curr_key = tuple(curr_parts)
+            if curr_key in seen_numbers:
+                first = seen_numbers[curr_key]
+                issues.append(
+                    {
+                        "issue_type": "Hierarchy_Fault",
+                        "severity": continuity_severity,
+                        "page_num": curr.page_num,
+                        "bbox": curr.bbox,
+                        "evidence": curr.content,
+                        "message": f"标题序号重复: {'.'.join(str(x) for x in curr_parts)} (首次出现: 第{first.page_num}页)",
+                        "location": {"page": curr.page_num, "bbox": curr.bbox},
+                    }
+                )
+            else:
+                seen_numbers[curr_key] = curr
+
+            if continuity_check:
+                if prev_heading:
+                    prev, prev_parts = prev_heading
+                    same_page = curr.page_num == prev.page_num
+                    prev_cx = (prev.bbox[0] + prev.bbox[2]) / 2.0
+                    curr_cx = (curr.bbox[0] + curr.bbox[2]) / 2.0
+                    same_column = abs(curr_cx - prev_cx) < column_threshold
+                    if same_page and same_column:
+                        if len(curr_parts) > len(prev_parts) + 1 and curr_parts[: len(prev_parts)] == prev_parts:
+                            issues.append(
+                                {
+                                    "issue_type": "Hierarchy_Fault",
+                                    "severity": continuity_severity,
+                                    "page_num": curr.page_num,
+                                    "bbox": curr.bbox,
+                                    "evidence": curr.content,
+                                    "message": "标题层级跳跃",
+                                    "location": {"page": curr.page_num, "bbox": curr.bbox},
+                                }
+                            )
+
+                parent = tuple(curr_parts[:-1])
+                child = curr_parts[-1]
+                last_child = last_child_by_parent.get(parent, 0)
+                expected = last_child + 1
+                if child > expected:
+                    prefix = ".".join(str(x) for x in parent)
+                    expected_str = f"{prefix + '.' if prefix else ''}{expected}"
                     issues.append(
                         {
                             "issue_type": "Hierarchy_Fault",
@@ -570,24 +773,13 @@ class VisualValidator:
                             "page_num": curr.page_num,
                             "bbox": curr.bbox,
                             "evidence": curr.content,
-                            "message": "标题层级跳跃",
-                            "location": {"page": curr.page_num, "bbox": curr.bbox}
+                            "message": f"标题序号不连续 (期望: {expected_str})",
+                            "location": {"page": curr.page_num, "bbox": curr.bbox},
                         }
                     )
-                    continue
-                if len(curr_parts) == len(prev_parts) and curr_parts[:-1] == prev_parts[:-1]:
-                    if curr_parts[-1] - prev_parts[-1] > 1:
-                        issues.append(
-                            {
-                                "issue_type": "Hierarchy_Fault",
-                                "severity": continuity_severity,
-                                "page_num": curr.page_num,
-                                "bbox": curr.bbox,
-                                "evidence": curr.content,
-                                "message": "标题序号不连续",
-                                "location": {"page": curr.page_num, "bbox": curr.bbox}
-                            }
-                        )
+                last_child_by_parent[parent] = max(last_child, child)
+
+            prev_heading = (curr, curr_parts)
         return issues
 
     def _check_citations(self, elements: List[VisualElement]) -> List[Dict[str, Any]]:

@@ -140,12 +140,21 @@ def is_heading_text(text: str) -> bool:
         return False
     if re.match(r"^\d{2,4}\s*年(\s*\d{1,2}\s*月)?(\s*\d{1,2}\s*日)?", t):
         return False
+    if re.search(r"[。！？]", t):
+        return False
     m = re.match(r"^(\d+(?:\.\d+)*)(?:[.、]|\s+)(.+)$", t)
     if m:
         rest = (m.group(2) or "").strip()
         if len(rest) < 2:
             return False
         if re.match(r"^(年|月|日)$", rest):
+            return False
+        rest_lower = rest.lower()
+        if rest_lower in {"begin", "end"}:
+            return False
+        if len(rest) > 60:
+            return False
+        if re.search(r"[，；：]", rest):
             return False
         return True
     if re.match(r"^第[一二三四五六七八九十百]+[章节]", t):
@@ -160,7 +169,7 @@ def classify_line_region(text: str, font_size: float, body_font: float, referenc
         return "chart"
     if is_formula_text(text):
         return "formula"
-    if is_heading_text(text) or font_size >= body_font * 1.3:
+    if (is_heading_text(text) and font_size >= body_font * 1.15) or font_size >= body_font * 1.3:
         return "title"
     if re.search(r"\[\d+(?:,\s*\d+)*\]", text) and (len(text) < 100 or re.match(r"^\s*\[\d+\]", text)):
         return "citation"

@@ -461,7 +461,7 @@ class PunctuationChecker:
         # 1. Mixed Punctuation Check
         if not self.allow_mixed:
             # 1a. General punctuation (excluding .)
-            cn_en_punct_pattern = re.compile(r"[\u4e00-\u9fff]\s*[,?!;:\(\)]")
+            cn_en_punct_pattern = re.compile(r"[\u4e00-\u9fff]\s*[,?!;:]")
             # 1b. Check for '.' specifically, avoiding TOC leaders
             cn_en_dot_pattern = re.compile(r"[\u4e00-\u9fff]\s*\.(?!\s*[\.\d])")
             # 1c. English text using Chinese punctuation

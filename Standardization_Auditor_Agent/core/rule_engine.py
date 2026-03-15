@@ -2,6 +2,7 @@ import yaml
 import os
 import asyncio
 from typing import Dict, Any
+from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.exc import ProgrammingError
 from .database import db_manager, AgentRule
@@ -13,7 +14,9 @@ class RuleEngine:
     """
     负责加载和管理审计规则 (支持从 DB 和 rules.yaml 加载)
     """
-    def __init__(self, config_path: str = "rules.yaml"):
+    def __init__(self, config_path: str | None = None):
+        if not config_path:
+            config_path = str(Path(__file__).resolve().parents[1] / "rules.yaml")
         self.config_path = config_path
         self.rules: Dict[str, Any] = {}
         # Initial load from YAML as fallback/default

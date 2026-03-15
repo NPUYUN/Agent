@@ -14,17 +14,20 @@ terminology_check:
     "CNN": ["C.N.N."]
 
 punctuation_check:
-  allow_mixed_punctuation: true
-  check_citation_position: false
+  allow_mixed_punctuation: false
+  check_citation_position: true
 
 citation_check:
   style: "IEEE"
-  check_reference_matching: false
+  check_reference_matching: true
 
 heading_check:
   max_depth: 6
   font_size_hierarchy: false
   bold_requirement: []
+  continuity_check: true
+  continuity_severity: "Info"
+  column_threshold: 200.0
 
 figure_table_check:
   position_constraint: "inline"
@@ -36,3 +39,5 @@ formula_check:
   alignment: "centered"
   numbering: "right"
   font_consistency: false
+  require_numbering: true
+  check_reference: true

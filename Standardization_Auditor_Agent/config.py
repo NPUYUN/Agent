@@ -2,9 +2,10 @@ from enum import Enum
 from typing import List
 import os
 from dotenv import load_dotenv
+from pathlib import Path
 
-# 加载 .env 文件中的环境变量
-load_dotenv()
+load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env", override=False)
+load_dotenv(override=False)
 
 # Agent基本信息
 AGENT_NAME = "Standardization_Auditor_Agent"
