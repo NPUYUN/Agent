@@ -1022,7 +1022,7 @@ class SemanticChecker:
             return None, None
 
         try:
-            query_vector = _embed_text_sbert(facts)
+            query_vector = await asyncio.to_thread(_embed_text_sbert, facts)
         except Exception as e:
             logger.warning(f"facts embedding failed: {e}")
             return None, None

@@ -1,6 +1,7 @@
 from pydantic import BaseModel, Field, field_validator, UUID4, ConfigDict
 from typing import Optional, List, Dict, Any
 from enum import Enum
+import re
 from config import ALLOWED_TAGS, AGENT_NAME, AGENT_VERSION
 
 class AuditLevel(str, Enum):
@@ -76,8 +77,19 @@ class IssueDetail(BaseModel):
         if isinstance(v, int):
             return v if v >= 0 else 0
         if isinstance(v, str):
-            v = v.strip()
-            return int(v) if v.isdigit() else 0
+            s = v.strip()
+            if re.fullmatch(r"-\d+", s):
+                return 0
+            if s.isdigit():
+                return int(s)
+            nums = re.findall(r"-?\d+", s)
+            if nums:
+                try:
+                    n = int(nums[0])
+                    return n if n >= 0 else 0
+                except Exception:
+                    return 0
+            return 0
         return 0
 
     @field_validator("bbox", mode="before")

@@ -28,8 +28,8 @@ from core.semantic_check import SemanticChecker
 from core.pdf_utils import open_pdf
 from core.database import db_manager, ReviewTask, TaskStatus, PaperSection
 from core.rule_engine import RuleEngine
-from utils.logger import setup_logger
-from config import AGENT_NAME, AGENT_VERSION, AuditTag, LAYOUT_ANALYSIS_TIMEOUT, LLM_PROVIDER, DATABASE_URL
+from utils.logger import setup_logger, set_request_id, reset_request_id
+from config import AGENT_NAME, AGENT_VERSION, AuditTag, LAYOUT_ANALYSIS_TIMEOUT, LLM_PROVIDER, DATABASE_URL, mask_database_url
 from sqlalchemy import select
 
 # 初始化日志
@@ -45,7 +45,7 @@ async def lifespan(app: FastAPI):
     logger.info(f"   {AGENT_NAME} {AGENT_VERSION} Starting up...")
     logger.info("==================================================")
     logger.info(f"LLM Provider: {LLM_PROVIDER}")
-    logger.info(f"DB Connection: {DATABASE_URL.split('@')[-1] if '@' in DATABASE_URL else 'Hidden'}")
+    logger.info(f"DB Connection: {mask_database_url(DATABASE_URL)}")
     logger.info(f"Layout Timeout: {LAYOUT_ANALYSIS_TIMEOUT}s")
     
     logger.info("Starting up: Connecting to database...")
@@ -84,12 +84,19 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         content={"detail": exc.errors(), "message": "Parameters validation failed"}
     )
 
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail, "message": "HTTP error"},
+    )
+
 @app.exception_handler(Exception)
 async def general_exception_handler(request: Request, exc: Exception):
     logger.error(f"Internal error: {str(exc)}", exc_info=True)
     return JSONResponse(
         status_code=500,
-        content={"detail": str(exc), "message": "Internal server error"}
+        content={"detail": "Internal server error", "message": "Internal server error"}
     )
 
 def _collect_tags(issues):
@@ -148,8 +155,8 @@ async def save_result_to_db(request: AuditRequest, response: AuditResponse | Non
             task.audit_level = response.result.audit_level.value if response else None
             task.result_json = response.model_dump(mode="json") if response else None
             task.error_msg = error_msg
-            task.usage_tokens = response.usage.tokens if response else 0
-            task.latency_ms = response.usage.latency_ms if response else 0
+            task.usage_tokens = response.usage.tokens if response else None
+            task.latency_ms = response.usage.latency_ms if response else None
             await session.commit()
             logger.info(f"Task {request.request_id} saved to DB (status={status}).")
             break
@@ -162,9 +169,10 @@ async def audit_paper(request: AuditRequest):
     接收论文切片，执行视觉与语义层面的格式审计，返回符合系统协议的JSON结果。
     Ref: 开发规范 - 四、API交互规范
     """
+    token = set_request_id(request.request_id)
     start_time = time.time()
-    logger.info(f"Received audit request: {request.request_id} for paper {request.metadata.paper_id}")
-    
+    logger.info(f"Received audit request for paper {request.metadata.paper_id}")
+
     try:
         await save_result_to_db(request, None, TaskStatus.RUNNING)
 
@@ -288,6 +296,8 @@ async def audit_paper(request: AuditRequest):
         # 记录失败状态
         await save_result_to_db(request, None, TaskStatus.FAILED, error_msg=str(e))
         raise e
+    finally:
+        reset_request_id(token)
 
 @app.get("/rules")
 async def get_rules():
@@ -321,7 +331,7 @@ async def root():
             <div class="config">
                 <pre>
 LLM_PROVIDER: {LLM_PROVIDER}
-DB_CONNECTION: {DATABASE_URL.split('@')[-1] if '@' in DATABASE_URL else 'Hidden'}
+DB_CONNECTION: {mask_database_url(DATABASE_URL)}
 LAYOUT_TIMEOUT: {LAYOUT_ANALYSIS_TIMEOUT}s
                 </pre>
             </div>

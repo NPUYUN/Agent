@@ -64,6 +64,23 @@ if not DATABASE_URL:
         auth = user_enc
     DATABASE_URL = "postgresql+asyncpg://" + auth + "@" + db_host + ":" + db_port + "/" + db_name
 
+def mask_database_url(url: str) -> str:
+    raw = (url or "").strip()
+    if not raw:
+        return "Hidden"
+    try:
+        normalized = raw.replace("postgresql+asyncpg://", "postgresql://", 1)
+        s = urlsplit(normalized)
+        if not s.hostname:
+            return "Hidden"
+        host = s.hostname
+        port = f":{s.port}" if s.port else ""
+        path = s.path or ""
+        scheme = s.scheme or "postgresql"
+        return f"{scheme}://***@{host}{port}{path}"
+    except Exception:
+        return "Hidden"
+
 # 专属System Prompt (Moved to core/prompts.py)
 # SYSTEM_PROMPT = "..."
 
