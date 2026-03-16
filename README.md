@@ -22,12 +22,11 @@ Standardization_Auditor_Agent/
 │   │   ├── PunctuationChecker  # 标点符号校验
 │   │   ├── CitationChecker     # 引用格式语义校验
 │   │   └── SemanticChecker     # 语义校验入口
-│   └── llm_client.py           # 统一 LLM 客户端 (支持 Gemini/Qwen)
+│   └── llm_client.py           # 统一 LLM 客户端 (支持 Gemini/Qwen/DeepSeek/Mock)
 ├── utils/                      # 通用工具库
 │   └── logger.py               # 标准化日志模块
-├── tests/                      # 测试用例（如目录为空，优先使用 scripts/ 下的集成验证脚本）
+├── tests/                      # 测试用例（当前目录可能为空，优先使用 CLI/手动验证）
 ├── scripts/                    # 运维脚本
-│   ├── verify_deployment.py    # 部署验证脚本 (端到端)
 │   └── seed_rules.py           # 规则库入库脚本
 ├── config.py                   # 全局配置 (Prompt, Version, Tags)
 ├── rules.yaml                  # 语义校验规则配置文件 (动态可调)
@@ -90,14 +89,13 @@ pip install -r requirements.txt
 
 ### 3. 配置环境变量
 
-支持 **Gemini** (Google), **Qwen** (DashScope/Aliyun) 和 **DeepSeek** (OpenAI Compatible) 多模型切换。推荐使用 `.env` 文件进行配置。
+支持 **Gemini** (Google)、**Qwen** (DashScope/Aliyun)、**DeepSeek** (OpenAI Compatible) 以及 **Mock** 多模型切换。推荐使用 `.env` 文件或系统环境变量进行配置。
 
-1. 在 `Standardization_Auditor_Agent` 目录下复制 `.env` 模板（如果不存在，请新建）：
-2. 编辑 `.env` 文件，填入您的 API Key：
+1. 在 `Standardization_Auditor_Agent` 目录下创建/编辑 `.env`（若仓库内已存在，请用你自己的 Key 覆盖示例值；不要提交真实 Key）：
 
 ```ini
 # LLM Configuration
-# Options: gemini, qwen, deepseek
+# Options: gemini, qwen, deepseek, mock
 LLM_PROVIDER=deepseek
 
 # DeepSeek API Configuration
@@ -162,14 +160,7 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000
   ```bash
   python -m unittest discover -s tests
   ```
-  若 `tests/` 目录为空或未包含可运行用例，建议优先使用集成验证脚本完成回归验证（见下条）。
-
-- **集成/部署验证（推荐）**  
-  在 `Standardization_Auditor_Agent` 目录下运行：
-  ```bash
-  python scripts/verify_deployment.py
-  ```
-  该脚本会启动服务并完成 `/health`、`/rules`、`/audit` 的端到端验证。
+  若 `tests/` 目录为空或未包含可运行用例，建议优先使用下方端到端示例与手动接口验证完成回归检查。
 
 - **端到端示例（PDF → 审计结果）**  
   在 `Standardization_Auditor_Agent` 目录下运行：
@@ -212,7 +203,7 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000
   "request_id": "req_20231027_001",
   "agent_info": {
     "name": "Standardization_Auditor_Agent",
-    "version": "v1.2"
+    "version": "v1.1"
   },
   "result": {
     "score": 85,
