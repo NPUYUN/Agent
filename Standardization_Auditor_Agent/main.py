@@ -25,6 +25,7 @@ from models import AuditRequest, AuditResponse, AgentInfo, AuditResult, Resource
 from core.layout_analysis import LayoutAnalyzer
 from api.layout_routes import router as layout_router
 from core.semantic_check import SemanticChecker
+from core.pdf_utils import open_pdf
 from core.database import db_manager, ReviewTask, TaskStatus, PaperSection
 from core.rule_engine import RuleEngine
 from utils.logger import setup_logger
@@ -198,11 +199,18 @@ async def audit_paper(request: AuditRequest):
             layout_data = await asyncio.wait_for(layout_analyzer.analyze(request.payload.content), timeout=LAYOUT_ANALYSIS_TIMEOUT)
         except asyncio.TimeoutError:
             logger.error(f"Layout analysis timeout (>{LAYOUT_ANALYSIS_TIMEOUT}s)")
+            page_count = None
+            try:
+                doc = open_pdf(request.payload.content)
+                page_count = len(doc)
+                doc.close()
+            except Exception:
+                page_count = None
             layout_data = {
                 "elements": [],
                 "layout_result": {"layout_issues": []},
                 "parse_errors": [{"error_type": "layout_timeout", "message": "layout analysis timeout"}],
-                "parse_report": {},
+                "parse_report": {"page_count": page_count} if page_count else {},
             }
         
         # 2. 语义校验
@@ -432,14 +440,14 @@ if __name__ == "__main__":
                     "elements": [],
                     "layout_result": {"layout_issues": []},
                     "parse_errors": [{"error_type": "layout_timeout", "message": "layout analysis timeout"}],
-                    "parse_report": {},
+                    "parse_report": {"page_count": len(doc)} if doc else {},
                 }
             except Exception as e:
                 layout_data = {
                     "elements": [],
                     "layout_result": {"layout_issues": []},
                     "parse_errors": [{"error_type": "layout_error", "message": str(e)}],
-                    "parse_report": {},
+                    "parse_report": {"page_count": len(doc)} if doc else {},
                 }
             
             # 3. Semantic Check

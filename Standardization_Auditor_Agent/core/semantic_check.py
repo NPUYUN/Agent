@@ -1309,6 +1309,82 @@ class SemanticChecker:
         
         issues = self._dedupe_issues(issues)
 
+        def _infer_doc_page_range() -> str:
+            elements = layout_data.get("elements", []) if isinstance(layout_data, dict) else []
+            pages: List[int] = []
+            for e in elements:
+                p = _element_get(e, "page_num")
+                if p is None:
+                    continue
+                try:
+                    pages.append(int(p))
+                except Exception:
+                    continue
+            if not pages:
+                if isinstance(layout_data, dict):
+                    selected_pages = layout_data.get("selected_pages")
+                    if isinstance(selected_pages, list):
+                        selected_ints: List[int] = []
+                        for p in selected_pages:
+                            try:
+                                pi = int(p)
+                            except Exception:
+                                continue
+                            if pi > 0:
+                                selected_ints.append(pi)
+                        if selected_ints:
+                            lo, hi = min(selected_ints), max(selected_ints)
+                            return str(lo) if lo == hi else f"{lo}-{hi}"
+
+                    parse_report = layout_data.get("parse_report")
+                    if isinstance(parse_report, dict):
+                        for k in ("page_count", "total_pages", "num_pages"):
+                            v = parse_report.get(k)
+                            try:
+                                vi = int(v)
+                            except Exception:
+                                vi = 0
+                            if vi > 0:
+                                return "1" if vi == 1 else f"1-{vi}"
+                        pages_val = parse_report.get("pages")
+                        if isinstance(pages_val, list):
+                            page_ints: List[int] = []
+                            for p in pages_val:
+                                try:
+                                    pi = int(p)
+                                except Exception:
+                                    continue
+                                if pi > 0:
+                                    page_ints.append(pi)
+                            if page_ints:
+                                lo, hi = min(page_ints), max(page_ints)
+                                return str(lo) if lo == hi else f"{lo}-{hi}"
+
+                return "N/A"
+            lo, hi = min(pages), max(pages)
+            if lo <= 0 or hi <= 0:
+                return "N/A"
+            if lo == hi:
+                return str(lo)
+            return f"{lo}-{hi}"
+
+        doc_page_range = _infer_doc_page_range()
+        for issue in issues:
+            if not isinstance(issue, dict):
+                continue
+            pg_raw = issue.get("page_num")
+            pg_str = str(pg_raw).strip() if pg_raw is not None else ""
+            if not pg_str or pg_str == "?":
+                loc = issue.get("location")
+                if isinstance(loc, dict):
+                    p = loc.get("page_num")
+                    if p is None:
+                        p = loc.get("page")
+                    if p is not None and str(p).strip():
+                        issue["page_num"] = str(p).strip()
+                        continue
+                issue["page_num"] = doc_page_range
+
         return {
             "semantic_issues": issues,
             "llm_feedback": llm_feedback,
