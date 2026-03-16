@@ -174,6 +174,12 @@ def _extract_numeric_citations(content: str) -> List[str]:
         nums = [n for n in re.findall(r"\d+", m.group(1) or "") if n and n != "0"]
         if not nums:
             continue
+        try:
+            int_nums = [int(n) for n in nums]
+        except Exception:
+            continue
+        if any(n >= 1000 for n in int_nums):
+            continue
         results.append(m.group(1))
     return results
 
@@ -749,15 +755,67 @@ class CitationChecker:
             return
             
         if not reference_texts and (numeric_citations or author_year_citations):
-            issues.append(
-                {
-                    "issue_type": "Reference_List_Missing",
-                    "severity": "Warning",
-                    "evidence": "",
-                    "message": "正文存在引用标注，但未检测到参考文献列表",
-                }
-            )
-            return
+            has_ref_section = False
+            try:
+                # Direct evidence of a reference section: title or region tagging
+                for e in elements:
+                    c = str(_element_get(e, "content") or "").strip()
+                    if not c:
+                        continue
+                    if is_reference_title(c):
+                        has_ref_section = True
+                        break
+                    if (_element_get(e, "region") or "") == "reference":
+                        has_ref_section = True
+                        break
+                # Fallback: tail detection of numbered items resembling references
+                if not has_ref_section:
+                    pages = []
+                    for e in elements:
+                        p = _element_get(e, "page_num")
+                        try:
+                            pages.append(int(p))
+                        except Exception:
+                            continue
+                    max_page = max(pages) if pages else 0
+                    start_page = None
+                    for e in elements:
+                        c = str(_element_get(e, "content") or "").strip()
+                        if is_reference_title(c):
+                            try:
+                                start_page = int(_element_get(e, "page_num"))
+                            except Exception:
+                                start_page = None
+                            break
+                    if start_page is None and max_page > 0:
+                        tail_pages = max(1, int(round(max_page * float(1.0 - self.reference_tail_ratio))))
+                        start_page = tail_pages
+                    ref_item_pat = re.compile(r"^\s*(\[\d+\]|\d+\.)\s+\S")
+                    if start_page is not None:
+                        for e in elements:
+                            p = _element_get(e, "page_num")
+                            try:
+                                p_int = int(p)
+                            except Exception:
+                                continue
+                            if p_int < int(start_page):
+                                continue
+                            c = str(_element_get(e, "content") or "")
+                            if ref_item_pat.match(c or ""):
+                                has_ref_section = True
+                                break
+            except Exception:
+                has_ref_section = False
+            if not has_ref_section:
+                issues.append(
+                    {
+                        "issue_type": "Reference_List_Missing",
+                        "severity": "Warning",
+                        "evidence": "",
+                        "message": "正文存在引用标注，但未检测到参考文献列表",
+                    }
+                )
+                return
             
         if numeric_citations:
             # Re-scan to find locations
@@ -766,7 +824,32 @@ class CitationChecker:
                 nums_in_cite = [n for n in re.findall(r"\d+", citation_text) if n and n != "0"]
                 if not nums_in_cite:
                     continue
-                missing_nums = [n for n in nums_in_cite if n not in ref_nums]
+                try:
+                    if any(int(n) >= 1000 for n in nums_in_cite):
+                        continue
+                    if any(int(n) >= 150 for n in nums_in_cite):
+                        continue
+                except Exception:
+                    continue
+                # Filter out numbers far beyond reference numbering range (likely non-citation)
+                max_ref_val = 0
+                try:
+                    if ref_nums:
+                        max_ref_val = max(int(x) for x in ref_nums if str(x).isdigit())
+                except Exception:
+                    max_ref_val = 0
+                if max_ref_val == 0 and reference_texts:
+                    try:
+                        max_ref_val = max(1, len(reference_texts))
+                    except Exception:
+                        max_ref_val = 0
+                filtered_nums = nums_in_cite
+                if max_ref_val > 0:
+                    try:
+                        filtered_nums = [n for n in nums_in_cite if int(n) <= max_ref_val + 10]
+                    except Exception:
+                        filtered_nums = nums_in_cite
+                missing_nums = [n for n in filtered_nums if n not in ref_nums]
                 
                 if missing_nums:
                     pg = mapper.get_page_num(m.start()) if mapper else "?"

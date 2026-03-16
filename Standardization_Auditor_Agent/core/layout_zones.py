@@ -26,15 +26,7 @@ def is_caption(text: str) -> bool:
     # Relaxed rule: Allow standalone caption numbers
     # if not rest:
     #     return False
-    if re.search(r"[。！？]", t):
-        return False
-    if re.match(r"^(中|的)", rest):
-        return False
-    if re.search(r"(展示|所示|如图|见图|如表|见表)", t):
-        if len(t) >= 20:
-            return False
-    if re.match(r"^(shows?|illustrates?)\\b", rest, re.IGNORECASE):
-        return False
+    # Allow sentence punctuation inside captions (common in theses)
     return True
 
 
@@ -79,6 +71,8 @@ def is_formula_text(text: str) -> bool:
     # Exclude list items / bullets
     if re.match(r"^\s*(•|o|\*|-|\d+\.)\s", text):
         return False
+    if re.match(r"^\s*\d+\s*[)）]\s*", stripped) and (stripped.endswith((":", "：")) or ":" in stripped or "：" in stripped):
+        return False
 
     if ":=" in stripped and re.search(r"[A-Za-z]", stripped) and not re.search(r"[∑∫√≈≠≤≥±×÷α-ωΑ-Ω∂∇∞]", stripped):
         return False
@@ -98,6 +92,8 @@ def is_formula_text(text: str) -> bool:
     # Exclude Key-Value pairs with simple numbers (e.g. "Width = 100")
     # Matches "Word = Number [Unit]"
     if re.match(r"^[A-Za-z\s]+=\s*\d+(\.\d+)?\s*[a-zA-Z%]*$", stripped):
+        return False
+    if re.fullmatch(r"[（(]\s*[A-Za-z][A-Za-z0-9_]{1,20}\s*=\s*[-+]?\d+(?:\.\d+)?\s*[A-Za-z%]{0,6}\s*\d{0,3}\s*[)）]", stripped):
         return False
 
     # 2. Positive checks: Formula indicators
@@ -160,9 +156,13 @@ def is_heading_text(text: str) -> bool:
         rest = (m.group(2) or "").strip()
         if len(rest) < 2:
             return False
+        rest_lower = rest.lower()
+        if rest_lower in {"if", "for", "while", "else", "elif", "return", "break", "continue", "pass", "then"}:
+            return False
+        if len(m.group(1).split(".")) == 1 and re.fullmatch(r"[A-Za-z]{2,4}", rest):
+            return False
         if re.match(r"^(年|月|日)$", rest):
             return False
-        rest_lower = rest.lower()
         if rest_lower in {"begin", "end"}:
             return False
         if len(rest) > 60:
@@ -184,8 +184,11 @@ def classify_line_region(text: str, font_size: float, body_font: float, referenc
         return "formula"
     if (is_heading_text(text) and font_size >= body_font * 1.15) or font_size >= body_font * 1.3:
         return "title"
-    if re.search(r"\[\d+(?:,\s*\d+)*\]", text) and (len(text) < 100 or re.match(r"^\s*\[\d+\]", text)):
-        return "citation"
+    m = re.search(r"\[\s*(\d+(?:\s*,\s*\d+)*)\s*\]", text)
+    if m and (len(text) < 100 or re.match(r"^\s*\[\d+\]", text)):
+        nums = [int(n) for n in re.findall(r"\d+", m.group(1) or "") if n.isdigit()]
+        if nums and all(0 < n < 1000 for n in nums):
+            return "citation"
     return "main"
 
 

@@ -4,7 +4,7 @@ import asyncio
 import re
 import statistics
 from .pdf_utils import open_pdf, extract_blocks, extract_drawing_regions, is_encrypted, is_scanned_page, split_columns, page_to_image
-from .layout_zones import is_reference_title, classify_line_region, is_caption, is_heading_text
+from .layout_zones import is_reference_title, classify_line_region, is_caption, is_heading_text, is_formula_text
 from .layout_exceptions import ParseError, ParseReport
 from .layout_rules import check_citation_reference_match, load_rules
 from .layout_adapter import with_anchor
@@ -59,6 +59,8 @@ def _find_citations(text: str) -> List[str]:
         for m in re.finditer(r"\[(\d+(?:\s*,\s*\d+)*)\]", t):
             nums = [int(x) for x in re.findall(r"\d+", m.group(1) or "") if x.isdigit()]
             if nums and any(n == 0 for n in nums):
+                continue
+            if nums and any(n >= 1000 for n in nums):
                 continue
             matches.append(m.group(0))
     for m in re.finditer(r"\(([A-Za-z][^)]{0,40}\d{4}[^)]*)\)", text):
@@ -514,8 +516,9 @@ class VisualValidator:
             return s
 
         caption_num_pat = re.compile(r"^\s*(?:图|表|Figure|Fig\.?|Table)\s*([0-9]+(?:\s*[-.−–—－]\s*[0-9]+)*)", flags=re.IGNORECASE)
+        # Require a boundary before/after 图/表/Figure/Table to avoid matching inside words like “代表”
         ref_pat = re.compile(
-            r"(?:如|见|参见|详见)?\s*(?:图|表|(?<![A-Za-z])(?:Figure|Fig\.?|Table)(?![A-Za-z]))\s*([0-9]+(?:\s*[-.−–—－]\s*[0-9]+)*)",
+            r"(?<![\u4e00-\u9fffA-Za-z0-9])(?:图|表|(?<![A-Za-z])(?:Figure|Fig\.?|Table)(?![A-Za-z]))\s*([0-9]+(?:\s*[-.−–—－]\s*[0-9]+)*)",
             flags=re.IGNORECASE,
         )
         figure_caption_pat = re.compile(r"^\s*(?:图|Figure|Fig\.?)\s*", flags=re.IGNORECASE)
@@ -532,8 +535,20 @@ class VisualValidator:
                 if norm:
                     caption_nums.add(norm)
         for t in text_refs:
-            for m in ref_pat.finditer(t.content or ""):
-                ref_num = _norm_label_num(m.group(1) or "")
+            text_content = t.content or ""
+            for m in ref_pat.finditer(text_content):
+                raw_num = m.group(1) or ""
+                end_pos = m.end(1)
+                next_ch = text_content[end_pos:end_pos + 1]
+                if next_ch and next_ch in {"-", ".", "−", "–", "—", "－"}:
+                    continue
+                if re.match(r"^\s*\d+\s*\.\s*\d+\s*\.\s*\d+", raw_num):
+                    continue
+                norm_num = re.sub(r"\s+", "", raw_num.strip())
+                sep_count = sum(norm_num.count(ch) for ch in ("-", ".", "−", "–", "—", "－"))
+                if sep_count >= 2:
+                    continue
+                ref_num = _norm_label_num(raw_num)
                 if ref_num and ref_num not in caption_nums:
                     issues.append(
                         {
@@ -550,7 +565,7 @@ class VisualValidator:
         captions_by_page: Dict[int, List[VisualElement]] = {}
         for c in captions:
             captions_by_page.setdefault(int(getattr(c, "page_num", 0) or 0), []).append(c)
-        has_any_figure_caption = any(figure_caption_pat.match(c.content or "") for c in captions)
+        has_any_caption = bool(captions)
 
         images_by_page: Dict[int, List[VisualElement]] = {}
         for img in images:
@@ -618,7 +633,7 @@ class VisualValidator:
             if is_table:
                 pass
 
-        if not has_any_figure_caption:
+        if not has_any_caption:
             return issues
 
         for page_num, page_images in images_by_page.items():
@@ -630,6 +645,8 @@ class VisualValidator:
             page_area = max(1.0, float(max_x) * float(max_y))
             page_captions = captions_by_page.get(page_num, [])
             figure_captions = [c for c in page_captions if figure_caption_pat.match(c.content or "")]
+            table_captions = [c for c in page_captions if table_caption_pat.match(c.content or "")]
+            caption_pool = figure_captions + table_captions
             covered = set()
             if figure_captions:
                 for cap in figure_captions:
@@ -728,6 +745,31 @@ class VisualValidator:
                 _, best_e, pos = candidates[0]
                 return best_e, pos
 
+            subcap_pat = re.compile(r"^\s*(?:图|Figure|Fig\.?)\s*[（(]?\s*[A-Za-z]\s*[)）]", flags=re.IGNORECASE)
+
+            def _has_subfigure_caption(img_el: VisualElement) -> bool:
+                for e in page_elements:
+                    if getattr(e, "type", "") not in {"text", "title", "chart"}:
+                        continue
+                    if (getattr(e, "region", "") or "") == "reference":
+                        continue
+                    txt = (getattr(e, "content", "") or "").strip()
+                    if not txt:
+                        continue
+                    if not subcap_pat.match(txt):
+                        continue
+                    overlap = min(e.bbox[2], img_el.bbox[2]) - max(e.bbox[0], img_el.bbox[0])
+                    if overlap <= 0:
+                        continue
+                    min_w = min(max(1.0, e.bbox[2] - e.bbox[0]), max(1.0, img_el.bbox[2] - img_el.bbox[0]))
+                    if overlap < min_w * 0.05:
+                        continue
+                    dy_below = float(e.bbox[1]) - float(img_el.bbox[3])
+                    dy_above = float(img_el.bbox[1]) - float(e.bbox[3])
+                    if (-6.0 <= dy_below <= float(max_y) * 0.18) or (-6.0 <= dy_above <= float(max_y) * 0.18):
+                        return True
+                return False
+
             for img in page_images:
                 try:
                     key = (round(float(img.bbox[0]), 1), round(float(img.bbox[1]), 1), round(float(img.bbox[2]), 1), round(float(img.bbox[3]), 1))
@@ -798,34 +840,39 @@ class VisualValidator:
                         continue
                 if key is not None and key in covered:
                     continue
+                if _has_subfigure_caption(img):
+                    continue
 
                 implicit = _implicit_caption(img)
                 if implicit:
                     cap, pos = implicit
-                    if fig_caption_pos == "bottom" and pos != "bottom":
+                    is_table_cap = bool(table_caption_pat.match(cap.content or ""))
+                    expected_pos = table_caption_pos if is_table_cap else fig_caption_pos
+                    noun = "表" if is_table_cap else "图"
+                    if expected_pos == "bottom" and pos != "bottom":
                         issues.append({
                             "issue_type": "Label_Missing",
                             "severity": "Info",
                             "page_num": cap.page_num,
                             "bbox": cap.bbox,
                             "evidence": cap.content,
-                            "message": f"图标题应位于图下方 (规则要求: {fig_caption_pos})",
+                            "message": f"{noun}标题应位于{noun}下方 (规则要求: {expected_pos})",
                             "location": {"page": cap.page_num, "bbox": cap.bbox},
                         })
                         continue
-                    if fig_caption_pos == "top" and pos != "top":
+                    if expected_pos == "top" and pos != "top":
                         issues.append({
                             "issue_type": "Label_Missing",
                             "severity": "Info",
                             "page_num": cap.page_num,
                             "bbox": cap.bbox,
                             "evidence": cap.content,
-                            "message": f"图标题应位于图上方 (规则要求: {fig_caption_pos})",
+                            "message": f"{noun}标题应位于{noun}上方 (规则要求: {expected_pos})",
                             "location": {"page": cap.page_num, "bbox": cap.bbox},
                         })
                         continue
                     continue
-                if not figure_captions:
+                if not caption_pool:
                     ev = _nearby_text(img, "bottom") or _nearby_text(img, "top")
                     issues.append(
                         {
@@ -842,7 +889,7 @@ class VisualValidator:
 
                 best = None
                 best_score = None
-                for c in figure_captions:
+                for c in caption_pool:
                     overlap = min(c.bbox[2], img.bbox[2]) - max(c.bbox[0], img.bbox[0])
                     if overlap <= 0:
                         c_mid = (c.bbox[0] + c.bbox[2]) / 2.0
@@ -1146,6 +1193,34 @@ class VisualValidator:
         continuity_severity = rule_config.get("continuity_severity", "Info")
         column_threshold = float(rule_config.get("column_threshold", 200.0))
 
+        page_max_y: Dict[int, float] = {}
+        for e in elements:
+            if not getattr(e, "bbox", None):
+                continue
+            page_max_y[e.page_num] = max(page_max_y.get(e.page_num, 0.0), float(e.bbox[3]))
+
+        heading_candidate_pos: Dict[str, Tuple[int, float, float]] = {}
+        for e in elements:
+            if not getattr(e, "bbox", None):
+                continue
+            max_y = page_max_y.get(e.page_num, 842.0) or 842.0
+            if e.bbox[1] <= max_y * 0.08 or e.bbox[3] >= max_y * 0.95:
+                continue
+            content = (getattr(e, "content", "") or "").strip()
+            if not content:
+                continue
+            if not is_heading_text(content):
+                continue
+            if _is_toc_like_heading(content):
+                continue
+            parts = _parse_heading_parts(content)
+            if not parts:
+                continue
+            key = ".".join(str(x) for x in parts)
+            pos = (int(getattr(e, "page_num", 0) or 0), float(e.bbox[1]), float(e.bbox[0]))
+            if key not in heading_candidate_pos or pos < heading_candidate_pos[key]:
+                heading_candidate_pos[key] = pos
+
         titles = [e for e in elements if e.type == "title" and e.region == "title"]
         title_text_counts: Dict[str, int] = {}
         for t in titles:
@@ -1154,11 +1229,6 @@ class VisualValidator:
                 continue
             title_text_counts[key] = title_text_counts.get(key, 0) + 1
         chapter_only_pat = re.compile(r"^第[0-9一二三四五六七八九十百千两零]+章$")
-        page_max_y: Dict[int, float] = {}
-        for e in elements:
-            if not getattr(e, "bbox", None):
-                continue
-            page_max_y[e.page_num] = max(page_max_y.get(e.page_num, 0.0), float(e.bbox[3]))
         titles = sorted(
             titles,
             key=lambda e: (
@@ -1248,6 +1318,12 @@ class VisualValidator:
                 if child > expected:
                     prefix = ".".join(str(x) for x in parent)
                     expected_str = f"{prefix + '.' if prefix else ''}{expected}"
+                    curr_pos = (int(getattr(curr, "page_num", 0) or 0), float(curr.bbox[1]), float(curr.bbox[0]))
+                    exp_pos = heading_candidate_pos.get(expected_str)
+                    if exp_pos and exp_pos < curr_pos:
+                        last_child_by_parent[parent] = max(last_child, child)
+                        prev_heading = (curr, curr_parts)
+                        continue
                     issues.append(
                         {
                             "issue_type": "Hierarchy_Fault",

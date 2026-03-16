@@ -30,8 +30,28 @@ def check_citation_reference_match(citations: List[Any], references: List[Any]) 
         m = re.match(r"^\s*(?:\[\s*(\d+)\s*\]|［\s*(\d+)\s*］|\(\s*(\d+)\s*\)|（\s*(\d+)\s*）|(\d+)\.|(\d+)\s)", r.content)
         if m:
             num = next((g for g in m.groups() if g is not None), None)
-            if num:
-                ref_nums.add(num)
+            if num and str(num).isdigit():
+                v = int(num)
+                if v == 0:
+                    continue
+                if v >= 1000:
+                    continue
+                if v > 300:
+                    continue
+                if _is_year_like(str(v)):
+                    continue
+                ref_nums.add(str(v))
+    max_ref_num = 0
+    try:
+        if ref_nums:
+            max_ref_num = max(int(n) for n in ref_nums if str(n).isdigit())
+    except Exception:
+        max_ref_num = 0
+    if max_ref_num == 0 and references:
+        try:
+            max_ref_num = max(1, len(references))
+        except Exception:
+            max_ref_num = 0
     issues: List[LayoutIssue] = []
     for c in citations:
         content = str(getattr(c, "content", "") or "")
@@ -58,6 +78,15 @@ def check_citation_reference_match(citations: List[Any], references: List[Any]) 
                     if p != "0" and not _is_year_like(p):
                         nums.append(p)
         if not nums:
+            continue
+        try:
+            if any(int(n) >= 1000 for n in nums):
+                continue
+            if any(int(n) >= 150 for n in nums):
+                continue
+            if max_ref_num > 0:
+                nums = [n for n in nums if int(n) <= max_ref_num + 10]
+        except Exception:
             continue
         missing = sorted({n for n in nums if n not in ref_nums}, key=lambda x: int(x))
         if missing:
