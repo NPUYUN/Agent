@@ -3,6 +3,7 @@ from typing import List
 import os
 from dotenv import load_dotenv
 from pathlib import Path
+from urllib.parse import quote_plus, urlsplit
 
 load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env", override=False)
 load_dotenv(override=False)
@@ -40,9 +41,28 @@ SBERT_DEVICE = os.getenv("SBERT_DEVICE", "")
 LAYOUT_ANALYSIS_TIMEOUT = int(os.getenv("LAYOUT_ANALYSIS_TIMEOUT", "300")) # 5分钟，适应长文档处理
 
 # 数据库配置
-# Remote (Default)
-# DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+asyncpg://user:password@localhost/dbname")
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+asyncpg://postgres:postgres@localhost:5433/agent_db")
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+if DATABASE_URL:
+    try:
+        normalized = DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://", 1)
+        s = urlsplit(normalized)
+        if (s.hostname or "").lower() in {"localhost", "127.0.0.1"}:
+            DATABASE_URL = ""
+    except Exception:
+        DATABASE_URL = ""
+
+if not DATABASE_URL:
+    db_host = os.getenv("DB_HOST", "10.13.1.26").strip()
+    db_port = os.getenv("DB_PORT", "5432").strip()
+    db_name = os.getenv("DB_NAME", "postgres").strip()
+    db_user = os.getenv("DB_USER", "Guest").strip()
+    db_password = os.getenv("DB_PASSWORD", "")
+    user_enc = quote_plus(db_user)
+    if db_password:
+        auth = user_enc + ":" + quote_plus(db_password)
+    else:
+        auth = user_enc
+    DATABASE_URL = "postgresql+asyncpg://" + auth + "@" + db_host + ":" + db_port + "/" + db_name
 
 # 专属System Prompt (Moved to core/prompts.py)
 # SYSTEM_PROMPT = "..."
