@@ -251,6 +251,43 @@ class PDFParser:
                 continue
             page_has_caption = False
             caption_lines: List[Tuple[List[float], str]] = []
+            pending_caption = None
+
+            def _union_bbox(a: List[float], b: List[float]) -> List[float]:
+                return [min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3])]
+
+            def _is_caption_continuation(t: str) -> bool:
+                s = (t or "").strip()
+                if not s:
+                    return False
+                if is_reference_title(s) or is_caption(s):
+                    return False
+                if is_heading_text(s) or is_formula_text(s):
+                    return False
+                if re.fullmatch(r"第\s*\d+\s*页", s):
+                    return False
+                if re.search(r"[。！？]$", s):
+                    return False
+                if len(s) < 4 or len(s) > 90:
+                    return False
+                return True
+
+            def _flush_caption():
+                nonlocal pending_caption
+                if not pending_caption:
+                    return
+                caption_lines.append((pending_caption["bbox"], pending_caption["text"]))
+                elements.append(
+                    VisualElement(
+                        type="title",
+                        content=pending_caption["text"],
+                        bbox=pending_caption["bbox"],
+                        page_num=page_num,
+                        region="chart",
+                    )
+                )
+                pending_caption = None
+
             for block in text_blocks:
                 block_bbox = _bbox_from_rect(block.get("bbox", (0, 0, 0, 0)))
                 for line in block.get("lines", []):
@@ -259,6 +296,13 @@ class PDFParser:
                         continue
                     line_bbox = _bbox_from_rect(line.get("bbox", block_bbox))
                     max_size = _max_font_size(line)
+                    if pending_caption:
+                        if pending_caption.get("lines", 1) < 3 and _is_caption_continuation(text):
+                            pending_caption["bbox"] = _union_bbox(pending_caption["bbox"], line_bbox)
+                            pending_caption["text"] = (pending_caption["text"] + " " + text).strip()
+                            pending_caption["lines"] = int(pending_caption.get("lines", 1)) + 1
+                            continue
+                        _flush_caption()
                     if is_reference_title(text):
                         reference_mode = True
                         reference_mode_global = True
@@ -274,16 +318,7 @@ class PDFParser:
                         continue
                     if is_caption(text):
                         page_has_caption = True
-                        caption_lines.append((line_bbox, text))
-                        elements.append(
-                            VisualElement(
-                                type="title",
-                                content=text,
-                                bbox=line_bbox,
-                                page_num=page_num,
-                                region="chart",
-                            )
-                        )
+                        pending_caption = {"bbox": line_bbox, "text": text, "lines": 1}
                         continue
                     region = classify_line_region(text, max_size, body_size, reference_mode)
                     citations = _find_citations(text)
@@ -330,6 +365,7 @@ class PDFParser:
                             region=region,
                         )
                     )
+            _flush_caption()
             if page_has_caption and not page_has_any_images:
                 drawing_regions = extract_drawing_regions(page)
                 if drawing_regions:
@@ -530,26 +566,35 @@ class VisualValidator:
                 if not same_page_images:
                     continue
                 
-                nearest = min(
-                    same_page_images,
-                    key=lambda i: abs(i.bbox[1] - c.bbox[1]),
-                )
-                
                 page_elements = [e for e in elements if e.page_num == c.page_num]
                 max_y = max((e.bbox[3] for e in page_elements), default=842.0)
-                
-                if abs(nearest.bbox[1] - c.bbox[1]) > max_y * 0.33:
-                    continue
-                
-                overlap = min(c.bbox[2], nearest.bbox[2]) - max(c.bbox[0], nearest.bbox[0])
-                c_w = max(0.0, c.bbox[2] - c.bbox[0])
-                i_w = max(0.0, nearest.bbox[2] - nearest.bbox[0])
-                min_w = min(c_w, i_w) if min(c_w, i_w) > 0 else 1.0
-                if overlap < min_w * 0.25:
-                    continue
+                max_x = max((e.bbox[2] for e in page_elements), default=595.0)
+                c_mid_x = (c.bbox[0] + c.bbox[2]) / 2.0
+                tol_y = 6.0
 
-                tolerance = 5.0
-                if fig_caption_pos == "bottom" and c.bbox[1] < nearest.bbox[1] - tolerance:
+                if fig_caption_pos == "bottom":
+                    candidates = [
+                        i
+                        for i in same_page_images
+                        if (c.bbox[1] - i.bbox[3]) <= max_y * 0.33 and (c.bbox[1] - i.bbox[3]) >= -tol_y
+                    ]
+                else:
+                    candidates = [
+                        i
+                        for i in same_page_images
+                        if (i.bbox[1] - c.bbox[3]) <= max_y * 0.33 and (i.bbox[1] - c.bbox[3]) >= -tol_y
+                    ]
+                if not candidates:
+                    continue
+                gx0 = min(i.bbox[0] for i in candidates)
+                gy0 = min(i.bbox[1] for i in candidates)
+                gx1 = max(i.bbox[2] for i in candidates)
+                gy1 = max(i.bbox[3] for i in candidates)
+                margin = float(max_x) * 0.02
+                if c_mid_x < gx0 - margin or c_mid_x > gx1 + margin:
+                    continue
+                
+                if fig_caption_pos == "bottom" and c.bbox[1] < gy1 - 5.0:
                      issues.append({
                         "issue_type": "Label_Missing",
                         "severity": "Info",
@@ -559,7 +604,7 @@ class VisualValidator:
                         "message": f"图标题应位于图下方 (规则要求: {fig_caption_pos})",
                         "location": {"page": c.page_num, "bbox": c.bbox}
                     })
-                elif fig_caption_pos == "top" and c.bbox[1] > nearest.bbox[1] + tolerance:
+                elif fig_caption_pos == "top" and c.bbox[3] > gy0 + 5.0:
                      issues.append({
                         "issue_type": "Label_Missing",
                         "severity": "Info",
@@ -585,6 +630,26 @@ class VisualValidator:
             page_area = max(1.0, float(max_x) * float(max_y))
             page_captions = captions_by_page.get(page_num, [])
             figure_captions = [c for c in page_captions if figure_caption_pat.match(c.content or "")]
+            covered = set()
+            if figure_captions:
+                for cap in figure_captions:
+                    cap_mid_x = (cap.bbox[0] + cap.bbox[2]) / 2.0
+                    candidates = [
+                        i
+                        for i in page_images
+                        if (cap.bbox[1] - i.bbox[3]) <= max_y * 0.30 and (cap.bbox[1] - i.bbox[3]) >= -6.0
+                    ]
+                    if not candidates:
+                        continue
+                    gx0 = min(i.bbox[0] for i in candidates)
+                    gx1 = max(i.bbox[2] for i in candidates)
+                    if cap_mid_x < gx0 - float(max_x) * 0.03 or cap_mid_x > gx1 + float(max_x) * 0.03:
+                        continue
+                    for i in candidates:
+                        try:
+                            covered.add((round(float(i.bbox[0]), 1), round(float(i.bbox[1]), 1), round(float(i.bbox[2]), 1), round(float(i.bbox[3]), 1)))
+                        except Exception:
+                            continue
 
             def _truncate(s: str, n: int = 120) -> str:
                 t = re.sub(r"\s+", " ", (s or "")).strip()
@@ -664,6 +729,10 @@ class VisualValidator:
                 return best_e, pos
 
             for img in page_images:
+                try:
+                    key = (round(float(img.bbox[0]), 1), round(float(img.bbox[1]), 1), round(float(img.bbox[2]), 1), round(float(img.bbox[3]), 1))
+                except Exception:
+                    key = None
                 iw = max(0.0, img.bbox[2] - img.bbox[0])
                 ih = max(0.0, img.bbox[3] - img.bbox[1])
                 img_area_ratio = (iw * ih) / page_area
@@ -727,6 +796,8 @@ class VisualValidator:
                     text_count = len([e for e in page_elements if getattr(e, "type", "") in {"text", "title", "citation", "chart", "formula"} and (getattr(e, "region", "") or "") != "reference"])
                     if near_edges and text_count >= 15:
                         continue
+                if key is not None and key in covered:
+                    continue
 
                 implicit = _implicit_caption(img)
                 if implicit:
@@ -774,7 +845,9 @@ class VisualValidator:
                 for c in figure_captions:
                     overlap = min(c.bbox[2], img.bbox[2]) - max(c.bbox[0], img.bbox[0])
                     if overlap <= 0:
-                        continue
+                        c_mid = (c.bbox[0] + c.bbox[2]) / 2.0
+                        if c_mid < img.bbox[0] - float(max_x) * 0.03 or c_mid > img.bbox[2] + float(max_x) * 0.03:
+                            continue
                     min_w = min(max(1.0, c.bbox[2] - c.bbox[0]), max(1.0, img.bbox[2] - img.bbox[0]))
                     if overlap < min_w * 0.2:
                         continue
