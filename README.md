@@ -25,7 +25,7 @@ Standardization_Auditor_Agent/
 │   └── llm_client.py           # 统一 LLM 客户端 (支持 Gemini/Qwen/DeepSeek/Mock)
 ├── utils/                      # 通用工具库
 │   └── logger.py               # 标准化日志模块
-├── tests/                      # 测试用例（当前目录可能为空，优先使用 CLI/手动验证）
+├── tests/                      # unittest 测试用例
 ├── scripts/                    # 运维脚本
 │   └── seed_rules.py           # 规则库入库脚本
 ├── config.py                   # 全局配置 (Prompt, Version, Tags)
@@ -91,7 +91,9 @@ pip install -r requirements.txt
 
 支持 **Gemini** (Google)、**Qwen** (DashScope/Aliyun)、**DeepSeek** (OpenAI Compatible) 以及 **Mock** 多模型切换。推荐使用 `.env` 文件或系统环境变量进行配置。
 
-1. 在 `Standardization_Auditor_Agent` 目录下创建/编辑 `.env`（若仓库内已存在，请用你自己的 Key 覆盖示例值；不要提交真实 Key）：
+1. 推荐在 Windows PowerShell 下使用 `Standardization_Auditor_Agent/set_env.local.ps1` 写入临时环境变量（该文件默认被忽略，不应提交真实 Key/密码）。
+
+2. 或者在 `Standardization_Auditor_Agent` 目录下创建/编辑 `.env`（不要提交真实 Key/密码；本仓库默认忽略所有 `.env*` 文件）：
 
 ```ini
 # LLM Configuration
@@ -112,8 +114,18 @@ QWEN_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 LLM_TIMEOUT_SEC=60
 LAYOUT_ANALYSIS_TIMEOUT=300
 
-# Database Configuration (Optional)
-# DATABASE_URL=postgresql+asyncpg://user:password@localhost/dbname
+# Database Configuration
+# 内网库：需要连接学校 VPN 才能访问
+# DB_HOST=10.13.1.26
+# DB_PORT=5432
+# DB_NAME=postgres
+#
+# 本机/容器库（示例）：按需覆盖
+# DB_HOST=localhost
+# DB_PORT=5433
+# DB_NAME=agent_db
+# DB_USER=postgres
+# DB_PASSWORD=your_password
 ```
 
 ### 4. 初始化数据库
@@ -121,6 +133,9 @@ LAYOUT_ANALYSIS_TIMEOUT=300
 ```bash
 python ensure_db.py
 ```
+
+说明：
+- 若连接内网数据库且账号为“只允许使用现有表、禁止建表”，请不要用该账号执行 `ensure_db.py` / `seed_rules.py` 等可能涉及 DDL 的脚本；这类脚本应使用具备 DDL 权限的管理员账号执行。
 
 ### 5. 运行审计
 

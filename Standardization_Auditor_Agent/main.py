@@ -21,7 +21,7 @@ if __name__ == "__main__":
     if not os.getenv("LLM_PROVIDER"):
         os.environ["LLM_PROVIDER"] = "deepseek"
 
-from models import AuditRequest, AuditResponse, AgentInfo, AuditResult, ResourceUsage, AuditLevel, IssueDetail
+from models import AuditRequest, AuditResponse, AgentInfo, AuditResult, ResourceUsage, AuditLevel
 from core.layout_analysis import LayoutAnalyzer
 from api.layout_routes import router as layout_router
 from core.semantic_check import SemanticChecker
@@ -155,8 +155,8 @@ async def save_result_to_db(request: AuditRequest, response: AuditResponse | Non
             task.audit_level = response.result.audit_level.value if response else None
             task.result_json = response.model_dump(mode="json") if response else None
             task.error_msg = error_msg
-            task.usage_tokens = response.usage.tokens if response else None
-            task.latency_ms = response.usage.latency_ms if response else None
+            task.usage_tokens = response.usage.tokens if response else 0
+            task.latency_ms = response.usage.latency_ms if response else 0
             await session.commit()
             logger.info(f"Task {request.request_id} saved to DB (status={status}).")
             break
@@ -207,11 +207,16 @@ async def audit_paper(request: AuditRequest):
             layout_data = await asyncio.wait_for(layout_analyzer.analyze(request.payload.content), timeout=LAYOUT_ANALYSIS_TIMEOUT)
         except asyncio.TimeoutError:
             logger.error(f"Layout analysis timeout (>{LAYOUT_ANALYSIS_TIMEOUT}s)")
+            def _count_pages_sync(pdf_payload):
+                doc = open_pdf(pdf_payload)
+                try:
+                    return len(doc)
+                finally:
+                    doc.close()
+
             page_count = None
             try:
-                doc = open_pdf(request.payload.content)
-                page_count = len(doc)
-                doc.close()
+                page_count = await asyncio.to_thread(_count_pages_sync, request.payload.content)
             except Exception:
                 page_count = None
             layout_data = {
@@ -229,17 +234,6 @@ async def audit_paper(request: AuditRequest):
         layout_issues = layout_data.get("layout_result", {}).get("layout_issues", [])
         issues = layout_issues + semantic_result.get("semantic_issues", [])
         score = semantic_checker._calculate_score(issues)
-
-        # 转换为 IssueDetail 对象列表
-        issue_details = []
-        for i in issues:
-            try:
-                if isinstance(i, dict):
-                    issue_details.append(IssueDetail(**i))
-                elif hasattr(i, 'model_dump'):
-                    issue_details.append(IssueDetail(**i.model_dump()))
-            except Exception as e:
-                logger.warning(f"Failed to convert issue to IssueDetail: {e}, issue: {i}")
 
         # 评分与评级逻辑
         audit_level = AuditLevel.INFO
@@ -277,8 +271,7 @@ async def audit_paper(request: AuditRequest):
                 audit_level=audit_level,
                 comment=comment,
                 suggestion=suggestion,
-                tags=tags,
-                issues=issue_details
+                tags=tags
             ),
             usage=ResourceUsage(
                 tokens=tokens,

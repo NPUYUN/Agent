@@ -114,7 +114,6 @@ class AuditResult(BaseModel):
     comment: str = Field(..., description="审计评语")
     suggestion: str = Field(..., description="修改建议")
     tags: List[str] = Field(..., description="问题标签")
-    issues: List[IssueDetail] = Field(default=[], description="详细问题列表")
 
     @field_validator('tags')
     def validate_tags(cls, v):

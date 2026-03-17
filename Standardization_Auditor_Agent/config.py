@@ -2,10 +2,8 @@ from enum import Enum
 from typing import List
 import os
 from dotenv import load_dotenv
-from pathlib import Path
 from urllib.parse import quote_plus, urlsplit
 
-load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env", override=False)
 load_dotenv(override=False)
 
 # Agent基本信息
@@ -42,20 +40,12 @@ LAYOUT_ANALYSIS_TIMEOUT = int(os.getenv("LAYOUT_ANALYSIS_TIMEOUT", "300")) # 5�
 
 # 数据库配置
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
-if DATABASE_URL:
-    try:
-        normalized = DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://", 1)
-        s = urlsplit(normalized)
-        if (s.hostname or "").lower() in {"localhost", "127.0.0.1"}:
-            DATABASE_URL = ""
-    except Exception:
-        DATABASE_URL = ""
 
 if not DATABASE_URL:
     db_host = os.getenv("DB_HOST", "10.13.1.26").strip()
     db_port = os.getenv("DB_PORT", "5432").strip()
     db_name = os.getenv("DB_NAME", "postgres").strip()
-    db_user = os.getenv("DB_USER", "Guest").strip()
+    db_user = os.getenv("DB_USER", "guest").strip()
     db_password = os.getenv("DB_PASSWORD", "")
     user_enc = quote_plus(db_user)
     if db_password:
