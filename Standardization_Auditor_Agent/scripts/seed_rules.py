@@ -19,7 +19,7 @@ async def seed_rules():
     print(f"Loaded {len(rules)} rules from rules.yaml")
     
     try:
-        async for session in db_manager.get_session():
+        async with db_manager.session() as session:
             for rule_id, rule_content in rules.items():
                 # Check if exists
                 stmt = select(AgentRule).where(AgentRule.rule_id == rule_id)
@@ -39,7 +39,6 @@ async def seed_rules():
             
             await session.commit()
             print("Done. Rules seeded successfully.")
-            break
     except Exception as e:
         print(f"Failed to seed rules: {e}")
 

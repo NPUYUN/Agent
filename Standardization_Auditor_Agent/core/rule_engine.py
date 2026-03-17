@@ -44,7 +44,7 @@ class RuleEngine:
         覆盖 YAML 中的同名规则
         """
         try:
-            async for session in db_manager.get_session():
+            async with db_manager.session() as session:
                 stmt = select(AgentRule)
                 result = await session.execute(stmt)
                 rules = result.scalars().all()
@@ -57,7 +57,6 @@ class RuleEngine:
                         self.rules[rule.rule_id] = rule.content
                 
                 logger.info(f"Loaded {len(rules)} rules from DB, total rules: {len(self.rules)}")
-                break # Close session
             return True
         except Exception as e:
             if isinstance(e, ProgrammingError):

@@ -993,7 +993,7 @@ class SemanticChecker:
         if not query_vector:
             return []
         try:
-            async for session in db_manager.get_session():
+            async with db_manager.session() as session:
                 distance = ExpertComment.embedding.op("<=>")(query_vector)
                 stmt = (
                     select(ExpertComment.text)

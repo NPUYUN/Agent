@@ -2,6 +2,7 @@ import os
 import sys
 import time
 import asyncio
+import re
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
@@ -26,11 +27,12 @@ from core.layout_analysis import LayoutAnalyzer
 from api.layout_routes import router as layout_router
 from core.semantic_check import SemanticChecker
 from core.pdf_utils import open_pdf
-from core.database import db_manager, ReviewTask, TaskStatus, PaperSection
+from core.database import db_manager, ReviewTask, TaskStatus
 from core.rule_engine import RuleEngine
 from utils.logger import setup_logger, set_request_id, reset_request_id
 from config import AGENT_NAME, AGENT_VERSION, AuditTag, LAYOUT_ANALYSIS_TIMEOUT, LLM_PROVIDER, DATABASE_URL, mask_database_url
-from sqlalchemy import select
+from sqlalchemy import select, text
+from sqlalchemy.exc import SQLAlchemyError
 
 # 初始化日志
 logger = setup_logger(AGENT_NAME)
@@ -119,12 +121,78 @@ def _collect_tags(issues):
             tag_set.add(AuditTag.PUNCTUATION_ERROR.value)
     return list(tag_set)
 
+
+def _extract_first_int(value: object) -> int | None:
+    if value is None:
+        return None
+    m = re.search(r"\d+", str(value))
+    if not m:
+        return None
+    try:
+        return int(m.group(0))
+    except Exception:
+        return None
+
+
+async def _fetch_content_from_db(session, paper_id: str, chunk_id: str) -> str | None:
+    paper_id_str = str(paper_id)
+    chunk_id_str = str(chunk_id)
+    chunk_int = _extract_first_int(chunk_id_str)
+
+    attempts: list[tuple[str, dict]] = [
+        (
+            "select content from paper_sections where paper_id = cast(:paper_id as uuid) and chunk_id = :chunk_id limit 1",
+            {"paper_id": paper_id_str, "chunk_id": chunk_id_str},
+        ),
+        (
+            "select section_content from paper_sections where paper_id = cast(:paper_id as uuid) and section_name = :chunk_id limit 1",
+            {"paper_id": paper_id_str, "chunk_id": chunk_id_str},
+        ),
+        (
+            "select section_content from paper_sections where paper_id = cast(:paper_id as uuid) and replace(section_name, ' ', '') = replace(:chunk_id, ' ', '') limit 1",
+            {"paper_id": paper_id_str, "chunk_id": chunk_id_str},
+        ),
+    ]
+    if chunk_int is not None:
+        attempts.insert(
+            1,
+            (
+                "select section_content from paper_sections where paper_id = cast(:paper_id as uuid) and section_id = :sid limit 1",
+                {"paper_id": paper_id_str, "sid": chunk_int},
+            ),
+        )
+        attempts.append(
+            (
+                "select review_content from reviews where paper_id = cast(:paper_id as uuid) and (review_id = :sid or section_id = :sid) limit 1",
+                {"paper_id": paper_id_str, "sid": chunk_int},
+            ),
+        )
+
+    for sql, params in attempts:
+        try:
+            row = (await session.execute(text(sql), params)).first()
+            if row and row[0]:
+                return str(row[0])
+        except SQLAlchemyError:
+            try:
+                await session.rollback()
+            except Exception:
+                pass
+            continue
+        except Exception:
+            try:
+                await session.rollback()
+            except Exception:
+                pass
+            continue
+    return None
+
 async def save_result_to_db(request: AuditRequest, response: AuditResponse | None, status: TaskStatus, error_msg: str | None = None):
     """
     异步写入 review_tasks 表，符合开发规范的数据持久化要求
     """
     try:
-        async for session in db_manager.get_session():
+        async with db_manager.session() as session:
             stmt = (
                 select(ReviewTask)
                 .where(
@@ -159,7 +227,6 @@ async def save_result_to_db(request: AuditRequest, response: AuditResponse | Non
             task.latency_ms = response.usage.latency_ms if response else 0
             await session.commit()
             logger.info(f"Task {request.request_id} saved to DB (status={status}).")
-            break
     except Exception as e:
         logger.error(f"Failed to save task to DB: {type(e).__name__}: {e!r}")
 
@@ -182,16 +249,8 @@ async def audit_paper(request: AuditRequest):
             logger.info(f"Content missing in payload. Fetching from DB for paper {request.metadata.paper_id}, chunk {request.metadata.chunk_id}")
             try:
                 # Use a new session to fetch content
-                async for session in db_manager.get_session():
-                    stmt = select(PaperSection).where(
-                        PaperSection.paper_id == request.metadata.paper_id,
-                        PaperSection.chunk_id == request.metadata.chunk_id
-                    )
-                    result = await session.execute(stmt)
-                    section = result.scalar_one_or_none()
-                    if section:
-                        content = section.content
-                    break # Close session
+                async with db_manager.session() as session:
+                    content = await _fetch_content_from_db(session, request.metadata.paper_id, request.metadata.chunk_id)
             except Exception as e:
                 logger.error(f"Failed to fetch content from DB: {type(e).__name__}: {e!r}")
             

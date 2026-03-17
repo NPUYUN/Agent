@@ -241,14 +241,11 @@ async def _ensure_table_paper_sections(conn):
         conn,
         """
         CREATE TABLE IF NOT EXISTS paper_sections (
-            id UUID,
+            section_id SERIAL PRIMARY KEY,
             paper_id UUID NOT NULL,
-            chunk_id TEXT NOT NULL,
-            section_name TEXT,
-            content TEXT NOT NULL,
-            metadata_json JSONB DEFAULT '{}'::jsonb,
-            created_at TIMESTAMP DEFAULT NOW(),
-            CONSTRAINT pk_paper_sections_id PRIMARY KEY (id)
+            section_name VARCHAR,
+            section_content TEXT,
+            content_vector vector(768)
         );
         """,
     )
@@ -257,11 +254,6 @@ async def _ensure_table_paper_sections(conn):
         return
 
     await _try_exec(conn, "CREATE INDEX IF NOT EXISTS ix_paper_sections_paper_id ON paper_sections (paper_id);")
-    await _try_exec(conn, "CREATE INDEX IF NOT EXISTS ix_paper_sections_chunk_id ON paper_sections (chunk_id);")
-    await _try_exec(
-        conn,
-        "CREATE UNIQUE INDEX IF NOT EXISTS uq_paper_sections_paper_chunk ON paper_sections (paper_id, chunk_id);",
-    )
 
 
 async def _ensure_table_expert_comments(conn):
@@ -269,11 +261,27 @@ async def _ensure_table_expert_comments(conn):
         conn,
         """
         CREATE TABLE IF NOT EXISTS expert_comments (
-            comment_id TEXT PRIMARY KEY,
-            metric_id TEXT NOT NULL,
-            text TEXT NOT NULL,
+            comment_id BIGSERIAL PRIMARY KEY,
+            rule_code VARCHAR,
+            rule_category VARCHAR,
+            rule_title VARCHAR,
+            rule_text TEXT,
+            indicator_name VARCHAR,
+            operator VARCHAR,
+            threshold_value DOUBLE PRECISION,
+            threshold_secondary DOUBLE PRECISION,
+            threshold_unit VARCHAR,
+            severity VARCHAR,
+            weight DOUBLE PRECISION,
+            is_hard_rule BOOLEAN,
+            evidence_pattern TEXT,
             embedding vector(768),
-            created_at TIMESTAMP DEFAULT NOW()
+            source VARCHAR,
+            active BOOLEAN DEFAULT TRUE,
+            created_at TIMESTAMP DEFAULT NOW(),
+            updated_at TIMESTAMP DEFAULT NOW(),
+            metric_id TEXT,
+            text TEXT
         );
         """,
     )
@@ -309,6 +317,8 @@ def _type_matches(expected: str, actual: str) -> bool:
         return True
     if e == "text":
         return ("text" in a) or ("character varying" in a) or ("varchar" in a)
+    if e == "varchar":
+        return ("character varying" in a) or ("varchar" in a)
     if e == "timestamp":
         return "timestamp" in a
     if e == "uuid":
@@ -317,6 +327,10 @@ def _type_matches(expected: str, actual: str) -> bool:
         return ("integer" in a) or ("int" in a)
     if e == "bigint":
         return ("bigint" in a) or ("bigint" == a)
+    if e in {"double", "double precision", "float"}:
+        return ("double precision" in a) or ("real" in a) or ("numeric" in a)
+    if e in {"boolean", "bool"}:
+        return ("boolean" in a) or ("bool" in a)
     if e == "jsonb":
         return "jsonb" in a
     if e == "vector":
@@ -520,9 +534,11 @@ async def ensure_tables_exist(database_url: str, db_name: str):
                 conn,
                 "paper_sections",
                 required_cols={
+                    "section_id": {"type": "integer", "ddl": None},
                     "paper_id": {"type": "uuid", "ddl": "ALTER TABLE paper_sections ADD COLUMN IF NOT EXISTS paper_id UUID;"},
-                    "section_name": {"type": "text", "ddl": "ALTER TABLE paper_sections ADD COLUMN IF NOT EXISTS section_name TEXT;"},
-                    "content": {"type": "text", "ddl": "ALTER TABLE paper_sections ADD COLUMN IF NOT EXISTS content TEXT;"},
+                    "section_name": {"type": "text", "ddl": "ALTER TABLE paper_sections ADD COLUMN IF NOT EXISTS section_name VARCHAR;"},
+                    "section_content": {"type": "text", "ddl": "ALTER TABLE paper_sections ADD COLUMN IF NOT EXISTS section_content TEXT;"},
+                    "content_vector": {"type": "vector", "ddl": "ALTER TABLE paper_sections ADD COLUMN IF NOT EXISTS content_vector vector(768);"},
                 },
                 required_indexes=[
                     ("ix_paper_sections_paper_id", ["paper_id"], False),
@@ -535,10 +551,27 @@ async def ensure_tables_exist(database_url: str, db_name: str):
                 conn,
                 "expert_comments",
                 required_cols={
-                    "comment_id": {"type": "text", "ddl": "ALTER TABLE expert_comments ADD COLUMN IF NOT EXISTS comment_id TEXT;"},
+                    "comment_id": {"type": "bigint", "ddl": None},
+                    "rule_code": {"type": "text", "ddl": "ALTER TABLE expert_comments ADD COLUMN IF NOT EXISTS rule_code VARCHAR;"},
+                    "rule_category": {"type": "text", "ddl": "ALTER TABLE expert_comments ADD COLUMN IF NOT EXISTS rule_category VARCHAR;"},
+                    "rule_title": {"type": "text", "ddl": "ALTER TABLE expert_comments ADD COLUMN IF NOT EXISTS rule_title VARCHAR;"},
+                    "rule_text": {"type": "text", "ddl": "ALTER TABLE expert_comments ADD COLUMN IF NOT EXISTS rule_text TEXT;"},
+                    "indicator_name": {"type": "text", "ddl": "ALTER TABLE expert_comments ADD COLUMN IF NOT EXISTS indicator_name VARCHAR;"},
+                    "operator": {"type": "text", "ddl": "ALTER TABLE expert_comments ADD COLUMN IF NOT EXISTS operator VARCHAR;"},
+                    "threshold_value": {"type": "double", "ddl": "ALTER TABLE expert_comments ADD COLUMN IF NOT EXISTS threshold_value DOUBLE PRECISION;"},
+                    "threshold_secondary": {"type": "double", "ddl": "ALTER TABLE expert_comments ADD COLUMN IF NOT EXISTS threshold_secondary DOUBLE PRECISION;"},
+                    "threshold_unit": {"type": "text", "ddl": "ALTER TABLE expert_comments ADD COLUMN IF NOT EXISTS threshold_unit VARCHAR;"},
+                    "severity": {"type": "text", "ddl": "ALTER TABLE expert_comments ADD COLUMN IF NOT EXISTS severity VARCHAR;"},
+                    "weight": {"type": "double", "ddl": "ALTER TABLE expert_comments ADD COLUMN IF NOT EXISTS weight DOUBLE PRECISION;"},
+                    "is_hard_rule": {"type": "boolean", "ddl": "ALTER TABLE expert_comments ADD COLUMN IF NOT EXISTS is_hard_rule BOOLEAN;"},
+                    "evidence_pattern": {"type": "text", "ddl": "ALTER TABLE expert_comments ADD COLUMN IF NOT EXISTS evidence_pattern TEXT;"},
+                    "embedding": {"type": "vector", "ddl": "ALTER TABLE expert_comments ADD COLUMN IF NOT EXISTS embedding vector(768);"},
+                    "source": {"type": "text", "ddl": "ALTER TABLE expert_comments ADD COLUMN IF NOT EXISTS source VARCHAR;"},
+                    "active": {"type": "boolean", "ddl": "ALTER TABLE expert_comments ADD COLUMN IF NOT EXISTS active BOOLEAN;"},
+                    "created_at": {"type": "timestamp", "ddl": "ALTER TABLE expert_comments ADD COLUMN IF NOT EXISTS created_at TIMESTAMP;"},
+                    "updated_at": {"type": "timestamp", "ddl": "ALTER TABLE expert_comments ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP;"},
                     "metric_id": {"type": "text", "ddl": "ALTER TABLE expert_comments ADD COLUMN IF NOT EXISTS metric_id TEXT;"},
                     "text": {"type": "text", "ddl": "ALTER TABLE expert_comments ADD COLUMN IF NOT EXISTS text TEXT;"},
-                    "embedding": {"type": "vector", "ddl": "ALTER TABLE expert_comments ADD COLUMN IF NOT EXISTS embedding vector(768);"},
                 },
                 required_indexes=[
                     ("ix_expert_comments_metric_id", ["metric_id"], False),

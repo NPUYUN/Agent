@@ -1,13 +1,13 @@
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, declarative_base
-from sqlalchemy import Column, String, Integer, Text, TIMESTAMP, BigInteger, Enum as SAEnum, UniqueConstraint
+from sqlalchemy import Column, String, Integer, Text, TIMESTAMP, BigInteger, Enum as SAEnum, Boolean, Float
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from typing import AsyncGenerator
 import enum
 from datetime import datetime
 from config import DATABASE_URL
-import uuid
 import os
+from contextlib import asynccontextmanager
 
 from pgvector.sqlalchemy import Vector
 
@@ -23,19 +23,43 @@ class TaskStatus(str, enum.Enum):
 class PaperSection(Base):
     """
     论文切片存储表 (paper_sections)
-    用于存储解析后的论文内容
     """
     __tablename__ = "paper_sections"
-    __table_args__ = (UniqueConstraint("paper_id", "chunk_id", name="uq_paper_sections_paper_chunk"),)
-    
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+
+    section_id = Column(Integer, primary_key=True, comment="章节ID")
     paper_id = Column(UUID(as_uuid=True), index=True, nullable=False, comment="论文ID")
-    chunk_id = Column(String, index=True, nullable=False, comment="切片ID")
     section_name = Column(String, comment="章节名称")
-    content = Column(Text, nullable=False, comment="切片内容")
-    metadata_json = Column(JSONB, default={}, comment="元数据")
-    
-    created_at = Column(TIMESTAMP, default=datetime.utcnow)
+    section_content = Column(Text, comment="章节内容")
+    content_vector = Column(Vector(768), nullable=True, comment="向量(768)")
+
+
+class PaperParagraph(Base):
+    __tablename__ = "paper_paragraphs"
+
+    paragraph_id = Column(Integer, primary_key=True, comment="段落ID")
+    paper_id = Column(UUID(as_uuid=True), index=True, nullable=False, comment="论文ID")
+    paragraph_name = Column(String, comment="段落名称")
+    paragraph_content = Column(Text, comment="段落内容")
+    content_vector = Column(Vector(768), nullable=True, comment="向量(768)")
+
+
+class Paper(Base):
+    __tablename__ = "papers"
+
+    paper_id = Column(UUID(as_uuid=True), primary_key=True, comment="论文ID")
+    title = Column(String, comment="标题")
+    abstract = Column(Text, comment="摘要")
+    abstract_vector = Column(Vector(768), nullable=True, comment="向量(768)")
+
+
+class Review(Base):
+    __tablename__ = "reviews"
+
+    review_id = Column(Integer, primary_key=True, comment="评审ID")
+    section_id = Column(Integer, comment="章节ID")
+    review_content = Column(Text, comment="评审内容")
+    paper_id = Column(UUID(as_uuid=True), index=True, nullable=False, comment="论文ID")
+    review_vector = Column(Vector(768), nullable=True, comment="向量(768)")
 
 class ExpertComment(Base):
     """
@@ -43,17 +67,31 @@ class ExpertComment(Base):
     用于存储量化规则和向量数据
     """
     __tablename__ = "expert_comments"
-    
-    comment_id = Column(String, primary_key=True, comment="评语唯一ID")
-    metric_id = Column(String, index=True, nullable=False, comment="关联指标/规则ID")
-    text = Column(Text, nullable=False, comment="专家原始评语内容")
+
+    comment_id = Column(BigInteger, primary_key=True, autoincrement=True, comment="评语唯一ID")
+    rule_code = Column(String, comment="规则编码")
+    rule_category = Column(String, comment="规则分类")
+    rule_title = Column(String, comment="规则标题")
+    rule_text = Column(Text, comment="规则正文")
+    indicator_name = Column(String, comment="指标名")
+    operator = Column(String, comment="比较算子")
+    threshold_value = Column(Float, comment="阈值主值")
+    threshold_secondary = Column(Float, comment="阈值次值")
+    threshold_unit = Column(String, comment="阈值单位")
+    severity = Column(String, comment="严重级别")
+    weight = Column(Float, comment="权重")
+    is_hard_rule = Column(Boolean, comment="是否硬规则")
+    evidence_pattern = Column(Text, comment="证据匹配模式")
     embedding = Column(Vector(768), nullable=True, comment="向量(768)")
-        
-    created_at = Column(TIMESTAMP, default=datetime.utcnow)
+    source = Column(String, comment="来源")
+    active = Column(Boolean, comment="是否启用")
+    created_at = Column(TIMESTAMP, comment="创建时间")
+    updated_at = Column(TIMESTAMP, comment="更新时间")
+    metric_id = Column(String, index=True, comment="关联指标/规则ID")
+    text = Column(Text, comment="专家原始评语内容")
 
 class AgentRule(Base):
     __tablename__ = "agent_rules"
-    __table_args__ = (UniqueConstraint("rule_id", name="uq_agent_rules_rule_id"),)
     
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     rule_id = Column(String, index=True, nullable=False, comment="规则ID")
@@ -76,7 +114,7 @@ class ReviewTask(Base):
     agent_name = Column(String, nullable=False, comment="负责审计的Agent名称")
     agent_version = Column(String, nullable=False, comment="审计时的模型/逻辑版本")
     
-    status = Column(SAEnum(TaskStatus), default=TaskStatus.PENDING, comment="任务状态")
+    status = Column(SAEnum(TaskStatus, name="taskstatus", create_type=False), default=TaskStatus.PENDING, comment="任务状态")
     
     score = Column(Integer, comment="从result_json冗余的分数")
     audit_level = Column(String, comment="风险等级：Info/Warning/Critical")
@@ -89,6 +127,26 @@ class ReviewTask(Base):
     
     created_at = Column(TIMESTAMP, default=datetime.utcnow, comment="任务创建时间")
     updated_at = Column(TIMESTAMP, default=datetime.utcnow, onupdate=datetime.utcnow, comment="任务最后一次状态变更时间")
+
+
+class AgentAudit(Base):
+    __tablename__ = "agent_audits"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    task_id = Column(UUID(as_uuid=True), index=True, nullable=False)
+    paper_id = Column(UUID(as_uuid=True), index=True, nullable=False)
+    chunk_id = Column(String)
+    agent_name = Column(String)
+    agent_version = Column(String)
+    status = Column(SAEnum(TaskStatus, name="audit_status", create_type=False))
+    score = Column(Integer)
+    audit_level = Column(String)
+    result_json = Column(JSONB)
+    error_msg = Column(Text)
+    usage_tokens = Column(Integer)
+    latency_ms = Column(Integer)
+    created_at = Column(TIMESTAMP)
+    updated_at = Column(TIMESTAMP)
 
 class DatabaseManager:
     """
@@ -109,6 +167,11 @@ class DatabaseManager:
         )
 
     async def get_session(self) -> AsyncGenerator[AsyncSession, None]:
+        async with self.async_session() as session:
+            yield session
+
+    @asynccontextmanager
+    async def session(self) -> AsyncGenerator[AsyncSession, None]:
         async with self.async_session() as session:
             yield session
 
