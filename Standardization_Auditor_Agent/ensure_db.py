@@ -63,7 +63,7 @@ def _build_db_url_from_env() -> str | None:
     )
 
 _CORE_TABLES = ("paper_sections", "expert_comments", "review_tasks")
-_OPTIONAL_TABLES = ("agent_rules",)
+_OPTIONAL_TABLES = ("agent_rules", "ground_truth_issues")
 _PUBLIC_SCHEMA = "public"
 _REVIEW_STATUS_ENUM = ("PENDING", "RUNNING", "SUCCESS", "FAILED", "TIMEOUT")
 
@@ -290,6 +290,49 @@ async def _ensure_table_expert_comments(conn):
         return
 
     await _try_exec(conn, "CREATE INDEX IF NOT EXISTS ix_expert_comments_metric_id ON expert_comments (metric_id);")
+    await _try_exec(
+        conn,
+        "CREATE INDEX IF NOT EXISTS idx_expert_comments_embedding ON expert_comments USING hnsw (embedding vector_cosine_ops);",
+    )
+
+
+async def _ensure_expert_comments_embedding_dim(conn) -> None:
+    row = (
+        await conn.execute(
+            text(
+                "SELECT pg_catalog.format_type(a.atttypid, a.atttypmod) AS formatted "
+                "FROM pg_attribute a "
+                "JOIN pg_class c ON a.attrelid=c.oid "
+                "JOIN pg_namespace n ON c.relnamespace=n.oid "
+                "WHERE n.nspname='public' AND c.relname='expert_comments' "
+                "AND a.attname='embedding' AND a.attnum>0 AND NOT a.attisdropped "
+                "LIMIT 1"
+            )
+        )
+    ).mappings().first()
+    formatted = str((row or {}).get("formatted") or "")
+    if formatted == "vector(768)":
+        return
+
+    can_ddl, ctx = await _ddl_allowed(conn, "expert_comments")
+    if not can_ddl:
+        print(f"⚠️ expert_comments.embedding dim mismatch ({formatted}), but no DDL privilege ({ctx}).")
+        return
+
+    await _try_exec(conn, "DROP INDEX IF EXISTS idx_expert_comments_embedding;")
+    ok, err = await _try_exec(
+        conn,
+        "ALTER TABLE expert_comments ALTER COLUMN embedding TYPE vector(768) USING "
+        "(((COALESCE(embedding, (array_fill(0.0::real, ARRAY[8]))::vector(8)))::real[] "
+        "|| array_fill(0.0::real, ARRAY[760]))::vector(768));",
+    )
+    if not ok:
+        print(f"❌ Failed to alter expert_comments.embedding to vector(768): {type(err).__name__}: {err}")
+        return
+    await _try_exec(
+        conn,
+        "CREATE INDEX IF NOT EXISTS idx_expert_comments_embedding ON expert_comments USING hnsw (embedding vector_cosine_ops);",
+    )
 
 
 async def _ensure_table_agent_rules(conn):
@@ -308,6 +351,36 @@ async def _ensure_table_agent_rules(conn):
         print(f"⚠️ Failed to create agent_rules: {type(err).__name__}: {err}")
         return
     await _try_exec(conn, "CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_rules_rule_id ON agent_rules (rule_id);")
+
+
+async def _ensure_table_ground_truth_issues(conn):
+    ok, err = await _try_exec(
+        conn,
+        """
+        CREATE TABLE IF NOT EXISTS ground_truth_issues (
+            id BIGSERIAL PRIMARY KEY,
+            sample_id TEXT,
+            paper_id UUID,
+            chunk_id TEXT,
+            issue_type TEXT NOT NULL,
+            severity TEXT,
+            message TEXT,
+            evidence TEXT,
+            page_num INTEGER,
+            bbox JSONB,
+            source TEXT,
+            created_at TIMESTAMP DEFAULT NOW(),
+            updated_at TIMESTAMP DEFAULT NOW()
+        );
+        """,
+    )
+    if not ok:
+        print(f"⚠️ Failed to create ground_truth_issues: {type(err).__name__}: {err}")
+        return
+    await _try_exec(conn, "CREATE INDEX IF NOT EXISTS ix_ground_truth_issues_sample_id ON ground_truth_issues (sample_id);")
+    await _try_exec(conn, "CREATE INDEX IF NOT EXISTS ix_ground_truth_issues_paper_id ON ground_truth_issues (paper_id);")
+    await _try_exec(conn, "CREATE INDEX IF NOT EXISTS ix_ground_truth_issues_paper_chunk ON ground_truth_issues (paper_id, chunk_id);")
+    await _try_exec(conn, "CREATE INDEX IF NOT EXISTS ix_ground_truth_issues_issue_type ON ground_truth_issues (issue_type);")
 
 
 def _type_matches(expected: str, actual: str) -> bool:
@@ -524,11 +597,13 @@ async def ensure_tables_exist(database_url: str, db_name: str):
             await _ensure_table_expert_comments(conn)
             await _ensure_table_review_tasks(conn)
             await _ensure_table_agent_rules(conn)
+            await _ensure_table_ground_truth_issues(conn)
 
             can_paper, ctx_paper = await _ddl_allowed(conn, "paper_sections")
             can_expert, ctx_expert = await _ddl_allowed(conn, "expert_comments")
             can_review, ctx_review = await _ddl_allowed(conn, "review_tasks")
             can_rules, ctx_rules = await _ddl_allowed(conn, "agent_rules")
+            can_gt, ctx_gt = await _ddl_allowed(conn, "ground_truth_issues")
 
             await _check_and_patch_table(
                 conn,
@@ -579,6 +654,7 @@ async def ensure_tables_exist(database_url: str, db_name: str):
                 can_ddl=can_expert,
                 ddl_context=ctx_expert,
             )
+            await _ensure_expert_comments_embedding_dim(conn)
 
             await _check_and_patch_table(
                 conn,
@@ -623,6 +699,34 @@ async def ensure_tables_exist(database_url: str, db_name: str):
                 ],
                 can_ddl=can_rules,
                 ddl_context=ctx_rules,
+            )
+
+            await _check_and_patch_table(
+                conn,
+                "ground_truth_issues",
+                required_cols={
+                    "id": {"type": "bigint", "ddl": None},
+                    "sample_id": {"type": "text", "ddl": "ALTER TABLE ground_truth_issues ADD COLUMN IF NOT EXISTS sample_id TEXT;"},
+                    "paper_id": {"type": "uuid", "ddl": "ALTER TABLE ground_truth_issues ADD COLUMN IF NOT EXISTS paper_id UUID;"},
+                    "chunk_id": {"type": "text", "ddl": "ALTER TABLE ground_truth_issues ADD COLUMN IF NOT EXISTS chunk_id TEXT;"},
+                    "issue_type": {"type": "text", "ddl": "ALTER TABLE ground_truth_issues ADD COLUMN IF NOT EXISTS issue_type TEXT;"},
+                    "severity": {"type": "text", "ddl": "ALTER TABLE ground_truth_issues ADD COLUMN IF NOT EXISTS severity TEXT;"},
+                    "message": {"type": "text", "ddl": "ALTER TABLE ground_truth_issues ADD COLUMN IF NOT EXISTS message TEXT;"},
+                    "evidence": {"type": "text", "ddl": "ALTER TABLE ground_truth_issues ADD COLUMN IF NOT EXISTS evidence TEXT;"},
+                    "page_num": {"type": "integer", "ddl": "ALTER TABLE ground_truth_issues ADD COLUMN IF NOT EXISTS page_num INTEGER;"},
+                    "bbox": {"type": "jsonb", "ddl": "ALTER TABLE ground_truth_issues ADD COLUMN IF NOT EXISTS bbox JSONB;"},
+                    "source": {"type": "text", "ddl": "ALTER TABLE ground_truth_issues ADD COLUMN IF NOT EXISTS source TEXT;"},
+                    "created_at": {"type": "timestamp", "ddl": "ALTER TABLE ground_truth_issues ADD COLUMN IF NOT EXISTS created_at TIMESTAMP;"},
+                    "updated_at": {"type": "timestamp", "ddl": "ALTER TABLE ground_truth_issues ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP;"},
+                },
+                required_indexes=[
+                    ("ix_ground_truth_issues_sample_id", ["sample_id"], False),
+                    ("ix_ground_truth_issues_paper_id", ["paper_id"], False),
+                    ("ix_ground_truth_issues_paper_chunk", ["paper_id", "chunk_id"], False),
+                    ("ix_ground_truth_issues_issue_type", ["issue_type"], False),
+                ],
+                can_ddl=can_gt,
+                ddl_context=ctx_gt,
             )
 
             print("✅ Schema verification & patch completed.")

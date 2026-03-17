@@ -79,3 +79,10 @@ llm_scan:
   enabled: true
   max_text_chars: 60000
   max_chunks: 2
+
+rag_eval:
+  enabled: true
+  top_k: 5
+  require_text: true
+  require_metric_id: false
+  require_active: true

@@ -41,6 +41,8 @@ async def seed_rules():
             print("Done. Rules seeded successfully.")
     except Exception as e:
         print(f"Failed to seed rules: {e}")
+    finally:
+        await db_manager.close()
 
 if __name__ == "__main__":
     asyncio.run(seed_rules())

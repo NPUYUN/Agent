@@ -1,6 +1,6 @@
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, declarative_base
-from sqlalchemy import Column, String, Integer, Text, TIMESTAMP, BigInteger, Enum as SAEnum, Boolean, Float
+from sqlalchemy import Column, String, Integer, Text, TIMESTAMP, BigInteger, Enum as SAEnum, Boolean, Float, CheckConstraint, text
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from typing import AsyncGenerator
 import enum
@@ -67,26 +67,29 @@ class ExpertComment(Base):
     用于存储量化规则和向量数据
     """
     __tablename__ = "expert_comments"
+    __table_args__ = (
+        CheckConstraint("weight IS NULL OR (weight >= 0 AND weight <= 1)", name="expert_comments_weight_check"),
+    )
 
     comment_id = Column(BigInteger, primary_key=True, autoincrement=True, comment="评语唯一ID")
     rule_code = Column(String, comment="规则编码")
     rule_category = Column(String, comment="规则分类")
-    rule_title = Column(String, comment="规则标题")
+    rule_title = Column(String, nullable=False, server_default=text("'默认规则标题'"), comment="规则标题")
     rule_text = Column(Text, comment="规则正文")
-    indicator_name = Column(String, comment="指标名")
+    indicator_name = Column(String, nullable=False, server_default=text("'默认指标名'"), comment="指标名")
     operator = Column(String, comment="比较算子")
     threshold_value = Column(Float, comment="阈值主值")
     threshold_secondary = Column(Float, comment="阈值次值")
     threshold_unit = Column(String, comment="阈值单位")
     severity = Column(String, comment="严重级别")
     weight = Column(Float, comment="权重")
-    is_hard_rule = Column(Boolean, comment="是否硬规则")
+    is_hard_rule = Column(Boolean, nullable=False, server_default=text("false"), comment="是否硬规则")
     evidence_pattern = Column(Text, comment="证据匹配模式")
     embedding = Column(Vector(768), nullable=True, comment="向量(768)")
     source = Column(String, comment="来源")
-    active = Column(Boolean, comment="是否启用")
-    created_at = Column(TIMESTAMP, comment="创建时间")
-    updated_at = Column(TIMESTAMP, comment="更新时间")
+    active = Column(Boolean, nullable=False, server_default=text("true"), comment="是否启用")
+    created_at = Column(TIMESTAMP, nullable=False, server_default=text("NOW()"), comment="创建时间")
+    updated_at = Column(TIMESTAMP, nullable=False, server_default=text("NOW()"), comment="更新时间")
     metric_id = Column(String, index=True, comment="关联指标/规则ID")
     text = Column(Text, comment="专家原始评语内容")
 
@@ -97,6 +100,23 @@ class AgentRule(Base):
     rule_id = Column(String, index=True, nullable=False, comment="规则ID")
     content = Column(Text, nullable=False, comment="规则内容(YAML/JSON字符串)")
     updated_at = Column(TIMESTAMP, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+class GroundTruthIssue(Base):
+    __tablename__ = "ground_truth_issues"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    sample_id = Column(String, index=True, comment="样本ID（可选：用于回归样本）")
+    paper_id = Column(UUID(as_uuid=True), index=True, comment="论文ID（可选：用于线上任务）")
+    chunk_id = Column(String, index=True, comment="切片ID（可选）")
+    issue_type = Column(String, index=True, nullable=False, comment="问题类型（与 issue.issue_type 对齐）")
+    severity = Column(String, comment="严重程度（Info/Warning/Critical 等）")
+    message = Column(Text, comment="问题描述（可选）")
+    evidence = Column(Text, comment="证据片段（可选）")
+    page_num = Column(Integer, comment="页码（可选）")
+    bbox = Column(JSONB, comment="可选：边界框/区域信息")
+    source = Column(String, comment="标注来源/标注者/批次（可选）")
+    created_at = Column(TIMESTAMP, default=datetime.utcnow, comment="创建时间")
+    updated_at = Column(TIMESTAMP, default=datetime.utcnow, onupdate=datetime.utcnow, comment="更新时间")
 
 class ReviewTask(Base):
     """

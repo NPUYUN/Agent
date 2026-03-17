@@ -100,7 +100,7 @@ async def _sql_probe(database_url: str, write_check: bool) -> Dict[str, Any]:
             ).scalar_one()
 
             checks = []
-            for t in ["review_tasks", "paper_sections", "expert_comments", "agent_rules"]:
+            for t in ["review_tasks", "paper_sections", "expert_comments", "agent_rules", "ground_truth_issues"]:
                 has_table = (
                     await conn.execute(
                         text(
@@ -144,6 +144,10 @@ async def _sql_probe(database_url: str, write_check: bool) -> Dict[str, Any]:
                         if not can_insert_review_tasks:
                             write_probe["skipped_reason"] = "no_insert_privilege_on_review_tasks"
                         else:
+                            try:
+                                await conn.rollback()
+                            except Exception:
+                                pass
                             tx = await conn.begin()
                             try:
                                 task_id = f"db_probe_{uuid.uuid4().hex[:12]}"
@@ -172,6 +176,10 @@ async def _sql_probe(database_url: str, write_check: bool) -> Dict[str, Any]:
                                 write_probe["insert_rollback"] = False
                                 write_probe["error"] = f"{type(e).__name__}: {e}"
                     else:
+                        try:
+                            await conn.rollback()
+                        except Exception:
+                            pass
                         tx = await conn.begin()
                         try:
                             await conn.execute(text("CREATE TEMP TABLE __db_probe_tmp (id int)"))
@@ -191,6 +199,48 @@ async def _sql_probe(database_url: str, write_check: bool) -> Dict[str, Any]:
                     write_probe["insert_rollback"] = False
                     write_probe["error"] = f"{type(e).__name__}: {e}"
 
+            vector_dims = {}
+            try:
+                targets = [
+                    ("expert_comments", "embedding"),
+                    ("paper_sections", "content_vector"),
+                    ("papers", "abstract_vector"),
+                    ("reviews", "review_vector"),
+                    ("paper_paragraphs", "content_vector"),
+                ]
+                for tbl, col in targets:
+                    row = (
+                        await conn.execute(
+                            text(
+                                "SELECT t.typname AS typ, a.atttypmod AS typmod, "
+                                "pg_catalog.format_type(a.atttypid, a.atttypmod) AS formatted "
+                                "FROM pg_attribute a "
+                                "JOIN pg_class c ON a.attrelid=c.oid "
+                                "JOIN pg_namespace n ON c.relnamespace=n.oid "
+                                "JOIN pg_type t ON a.atttypid=t.oid "
+                                "WHERE n.nspname='public' AND c.relname=:tbl AND a.attname=:col "
+                                "AND a.attnum>0 AND NOT a.attisdropped "
+                                "LIMIT 1"
+                            ),
+                            {"tbl": tbl, "col": col},
+                        )
+                    ).mappings().first()
+                    if not row:
+                        continue
+                    typ = row.get("typ")
+                    typmod = row.get("typmod")
+                    formatted = row.get("formatted")
+                    dim = None
+                    try:
+                        s = str(formatted or "")
+                        if s.startswith("vector(") and s.endswith(")"):
+                            dim = int(s[len("vector(") : -1])
+                    except Exception:
+                        dim = None
+                    vector_dims[f"{tbl}.{col}"] = {"type": typ, "typmod": typmod, "formatted": formatted, "dim": dim}
+            except Exception as e:
+                vector_dims = {"error": f"{type(e).__name__}: {e}"}
+
             return {
                 "connected": True,
                 "current_user": current_user,
@@ -200,6 +250,7 @@ async def _sql_probe(database_url: str, write_check: bool) -> Dict[str, Any]:
                 "schema_create": bool(schema_create),
                 "table_privileges": checks,
                 "write_probe": write_probe,
+                "vector_dims": vector_dims,
             }
     finally:
         await engine.dispose()
@@ -264,6 +315,16 @@ async def main() -> int:
             f"UPDATE={c.get('can_update')} "
             f"DELETE={c.get('can_delete')}"
         )
+    vd = res.get("vector_dims") or {}
+    if isinstance(vd, dict) and vd:
+        if "error" in vd:
+            print(f"VECTOR_DIMS: ERROR ({vd.get('error')})")
+        else:
+            for k, info in vd.items():
+                if not isinstance(info, dict):
+                    continue
+                formatted = info.get("formatted")
+                print(f"VECTOR_DIM {k}: {formatted} dim={info.get('dim')}")
     wp = res.get("write_probe") or {}
     if wp.get("attempted"):
         if wp.get("insert_rollback") is True:

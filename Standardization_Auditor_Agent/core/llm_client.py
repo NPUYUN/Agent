@@ -3,6 +3,7 @@ from google.genai import types
 from openai import AsyncOpenAI
 from typing import Optional
 import json
+import re
 from utils.logger import setup_logger
 from config import (
     GEMINI_MODEL_NAME, GOOGLE_API_KEY,
@@ -114,6 +115,51 @@ class LLMClient:
         temperature: float = 0.1,
         max_tokens: int = 800,
     ) -> str:
+        if self.provider == "mock":
+            sys_text = (system_prompt or "").strip()
+            user_text = (user_prompt or "").strip()
+            if "提取可核查的客观事实点" in sys_text:
+                parts = re.split(r"[。！？\n]+", user_text)
+                facts = []
+                for p in parts:
+                    t = p.strip()
+                    if not t:
+                        continue
+                    t = re.sub(r"\s+", " ", t)
+                    if len(t) > 30:
+                        t = t[:30]
+                    facts.append(f"- {t}")
+                    if len(facts) >= 12:
+                        break
+                return "\n".join(facts)
+
+            if "必须以JSON对象输出" in sys_text and "comment" in sys_text and "suggestion" in sys_text:
+                issue_summary = ""
+                expert_comments = ""
+                try:
+                    data = json.loads(user_text)
+                    issue_summary = str(data.get("issue_summary") or "")
+                    expert_comments = str(data.get("expert_comments") or "")
+                except Exception:
+                    issue_summary = user_text[:800]
+                    expert_comments = ""
+
+                top_tip = ""
+                m = re.search(r"^- (.+)$", expert_comments, flags=re.MULTILINE)
+                if m:
+                    top_tip = m.group(1).strip()
+
+                comment = "已完成格式审计。"
+                if issue_summary.strip() and issue_summary.strip() != "-":
+                    comment = f"发现以下问题：\n{issue_summary}".strip()
+                suggestion = "请优先修复 Critical/Warning，再统一排版细节。"
+                if top_tip:
+                    suggestion = f"{suggestion}\n参考建议：{top_tip}"
+
+                return json.dumps({"comment": comment, "suggestion": suggestion}, ensure_ascii=False)
+
+            return ""
+
         if self.provider == "gemini":
             if not self.gemini_client:
                 return ""

@@ -3,6 +3,7 @@ import sys
 import time
 import asyncio
 import re
+from typing import Any, Dict
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
@@ -25,6 +26,7 @@ if __name__ == "__main__":
 from models import AuditRequest, AuditResponse, AgentInfo, AuditResult, ResourceUsage, AuditLevel
 from core.layout_analysis import LayoutAnalyzer
 from api.layout_routes import router as layout_router
+from api.admin_routes import build_admin_router
 from core.semantic_check import SemanticChecker
 from core.pdf_utils import open_pdf
 from core.database import db_manager, ReviewTask, TaskStatus
@@ -76,6 +78,7 @@ app.include_router(layout_router)
 # 初始化核心组件
 layout_analyzer = LayoutAnalyzer()
 semantic_checker = SemanticChecker()
+app.include_router(build_admin_router(rule_engine, layout_analyzer, semantic_checker))
 
 # 自定义异常处理，符合规范要求的HTTP状态码
 @app.exception_handler(RequestValidationError)
@@ -111,15 +114,40 @@ def _collect_tags(issues):
             issue_type = getattr(issue, "issue_type", "") or ""
         if not issue_type:
             continue
-        if "Citation" in issue_type:
+        issue_type_norm = str(issue_type).strip()
+        issue_type_lower = issue_type_norm.lower()
+        if ("citation" in issue_type_lower) or ("reference" in issue_type_lower):
             tag_set.add(AuditTag.CITATION_INCONSISTENCY.value)
-        if issue_type == "Label_Missing":
+        if issue_type_norm == "Label_Missing":
             tag_set.add(AuditTag.LABEL_MISSING.value)
-        if issue_type == "Hierarchy_Fault":
+        if issue_type_norm == "Hierarchy_Fault":
             tag_set.add(AuditTag.HIERARCHY_FAULT.value)
-        if "Punctuation" in issue_type:
+        if "punctuation" in issue_type_lower:
             tag_set.add(AuditTag.PUNCTUATION_ERROR.value)
     return list(tag_set)
+
+
+def _compact_issue(issue: Any) -> Dict[str, Any]:
+    if not isinstance(issue, dict):
+        try:
+            issue = issue.model_dump()  # type: ignore[attr-defined]
+        except Exception:
+            issue = {}
+    out: Dict[str, Any] = {}
+    for k in ("issue_type", "severity", "message", "suggestion", "evidence"):
+        v = issue.get(k)
+        if v is not None and v != "":
+            out[k] = v
+    page_num = issue.get("page_num")
+    if page_num is not None and page_num != "":
+        try:
+            out["page_num"] = int(page_num)
+        except Exception:
+            out["page_num"] = str(page_num)
+    bbox = issue.get("bbox")
+    if bbox is not None:
+        out["bbox"] = bbox
+    return out
 
 
 def _extract_first_int(value: object) -> int | None:
@@ -187,7 +215,13 @@ async def _fetch_content_from_db(session, paper_id: str, chunk_id: str) -> str |
             continue
     return None
 
-async def save_result_to_db(request: AuditRequest, response: AuditResponse | None, status: TaskStatus, error_msg: str | None = None):
+async def save_result_to_db(
+    request: AuditRequest,
+    response: AuditResponse | None,
+    status: TaskStatus,
+    error_msg: str | None = None,
+    debug: Dict[str, Any] | None = None,
+):
     """
     异步写入 review_tasks 表，符合开发规范的数据持久化要求
     """
@@ -221,7 +255,10 @@ async def save_result_to_db(request: AuditRequest, response: AuditResponse | Non
             task.status = status
             task.score = response.result.score if response else None
             task.audit_level = response.result.audit_level.value if response else None
-            task.result_json = response.model_dump(mode="json") if response else None
+            payload = response.model_dump(mode="json") if response else None
+            if isinstance(payload, dict) and debug:
+                payload["debug"] = debug
+            task.result_json = payload
             task.error_msg = error_msg
             task.usage_tokens = response.usage.tokens if response else 0
             task.latency_ms = response.usage.latency_ms if response else 0
@@ -340,13 +377,17 @@ async def audit_paper(request: AuditRequest):
         
         # 4. 异步写入数据库 (Fire-and-forget or await depending on requirement)
         # 规范要求"实时写入"，这里使用 await 确保数据落库
-        await save_result_to_db(request, response, TaskStatus.SUCCESS)
+        debug = {
+            "issue_count": int(len(issues)),
+            "issues": [_compact_issue(i) for i in (issues or [])],
+        }
+        await save_result_to_db(request, response, TaskStatus.SUCCESS, debug=debug)
         
         return response
         
     except Exception as e:
         # 记录失败状态
-        await save_result_to_db(request, None, TaskStatus.FAILED, error_msg=str(e))
+        await save_result_to_db(request, None, TaskStatus.FAILED, error_msg=str(e), debug={"error": str(e)})
         raise e
     finally:
         reset_request_id(token)

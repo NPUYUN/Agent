@@ -119,9 +119,7 @@ class AuditResult(BaseModel):
     def validate_tags(cls, v):
         for tag in v:
             if tag not in ALLOWED_TAGS:
-                # 弱校验，仅记录日志或允许通过，遵循"格式至上"原则，但作为Standardization Agent，
-                # 我们应当尽可能返回标准tag。此处保留逻辑，不强制报错。
-                pass
+                raise ValueError(f"invalid tag: {tag}")
         return v
 
 class ResourceUsage(BaseModel):

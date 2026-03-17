@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import sys
@@ -18,6 +19,8 @@ class Sample:
     sample_id: str
     kind: str
     path: Path
+    url: Optional[str] = None
+    sha256: Optional[str] = None
 
 
 def _repo_root() -> Path:
@@ -31,9 +34,11 @@ def _load_manifest(path: Path) -> List[Sample]:
         sample_id = str(s.get("id") or "").strip()
         kind = str(s.get("kind") or "").strip()
         rel = str(s.get("path") or "").strip()
+        url = str(s.get("url") or "").strip() or None
+        sha256 = str(s.get("sha256") or "").strip() or None
         if not sample_id or not rel:
             continue
-        samples.append(Sample(sample_id=sample_id, kind=kind, path=_repo_root() / rel))
+        samples.append(Sample(sample_id=sample_id, kind=kind, path=_repo_root() / rel, url=url, sha256=sha256))
     return samples
 
 
@@ -66,6 +71,49 @@ def _scan_default_samples() -> List[Sample]:
         if s.sample_id not in uniq:
             uniq[s.sample_id] = s
     return list(uniq.values())
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+async def _maybe_download(sample: Sample) -> bool:
+    if sample.path.exists():
+        return True
+    if not sample.url:
+        return False
+
+    try:
+        import httpx
+    except Exception:
+        return False
+
+    sample.path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = sample.path.with_suffix(sample.path.suffix + ".tmp")
+
+    async with httpx.AsyncClient(follow_redirects=True, timeout=60.0) as client:
+        async with client.stream("GET", sample.url) as resp:
+            resp.raise_for_status()
+            with tmp_path.open("wb") as f:
+                async for chunk in resp.aiter_bytes():
+                    if chunk:
+                        f.write(chunk)
+
+    if sample.sha256:
+        digest = _sha256_file(tmp_path)
+        if digest.lower() != sample.sha256.lower():
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            return False
+
+    tmp_path.replace(sample.path)
+    return True
 
 
 def _extract_text(pdf_path: Path, pages: Optional[List[int]]) -> Tuple[str, int]:
@@ -101,8 +149,10 @@ async def _run_one(
         "path": str(sample.path),
         "exists": sample.path.exists(),
     }
-    if not sample.path.exists():
+    if not await _maybe_download(sample):
+        result["exists"] = sample.path.exists()
         return result
+    result["exists"] = True
 
     text_content, page_count = _extract_text(sample.path, pages)
     result["page_count"] = page_count
@@ -213,4 +263,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

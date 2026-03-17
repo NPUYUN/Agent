@@ -6,7 +6,7 @@ import re
 import json
 from config import LLM_TIMEOUT_SEC
 from .llm_client import LLMClient
-from sqlalchemy import select
+from sqlalchemy import select, func, or_
 from .database import db_manager, ExpertComment
 from utils.logger import setup_logger
 
@@ -62,6 +62,10 @@ def _embed_text_sbert(text: str) -> List[float]:
         logger.warning(f"SBERT embedding dim mismatch: expected 768, got {len(vec_list)}. Using fallback embedding.")
         return _embed_text_fallback(text)
     return vec_list
+
+
+def _embed_text_expert_comment(text: str) -> List[float]:
+    return _embed_text_sbert(text)
 
 
 def _element_get(element: Any, key: str) -> Any:
@@ -989,18 +993,30 @@ class SemanticChecker:
             logger.warning(f"facts extraction failed: {e}")
             return ""
 
-    async def _retrieve_expert_comments(self, query_vector: List[float], top_k: int = 5) -> List[str]:
+    async def _retrieve_expert_comments(
+        self,
+        query_vector: List[float],
+        top_k: int,
+        require_text: bool,
+        require_metric_id: bool,
+        require_active: bool,
+    ) -> List[str]:
         if not query_vector:
             return []
         try:
             async with db_manager.session() as session:
                 distance = ExpertComment.embedding.op("<=>")(query_vector)
-                stmt = (
-                    select(ExpertComment.text)
-                    .where(ExpertComment.embedding.is_not(None))
-                    .order_by(distance.asc())
-                    .limit(top_k)
-                )
+                predicates = [ExpertComment.embedding.is_not(None)]
+                if require_text:
+                    predicates.append(ExpertComment.text.is_not(None))
+                    predicates.append(func.length(func.trim(ExpertComment.text)) > 0)
+                if require_metric_id:
+                    predicates.append(ExpertComment.metric_id.is_not(None))
+                    predicates.append(func.length(func.trim(ExpertComment.metric_id)) > 0)
+                if require_active:
+                    predicates.append(or_(ExpertComment.active.is_(True), ExpertComment.active.is_(None)))
+
+                stmt = select(ExpertComment.text).where(*predicates).order_by(distance.asc()).limit(top_k)
                 result = await session.execute(stmt)
                 return [row[0] for row in result.all() if row and row[0]]
         except Exception as e:
@@ -1016,18 +1032,29 @@ class SemanticChecker:
         enabled = bool(llm_cfg.get("enabled", True))
         if not enabled:
             return None, None
+        top_k_val = int(llm_cfg.get("top_k", top_k) or top_k)
+        top_k_val = max(1, min(20, top_k_val))
+        require_text = bool(llm_cfg.get("require_text", True))
+        require_metric_id = bool(llm_cfg.get("require_metric_id", False))
+        require_active = bool(llm_cfg.get("require_active", True))
 
         facts = await self._extract_facts_llm(content)
         if not facts:
             return None, None
 
         try:
-            query_vector = await asyncio.to_thread(_embed_text_sbert, facts)
+            query_vector = await asyncio.to_thread(_embed_text_expert_comment, facts)
         except Exception as e:
             logger.warning(f"facts embedding failed: {e}")
             return None, None
 
-        expert_texts = await self._retrieve_expert_comments(query_vector, top_k=top_k)
+        expert_texts = await self._retrieve_expert_comments(
+            query_vector,
+            top_k=top_k_val,
+            require_text=require_text,
+            require_metric_id=require_metric_id,
+            require_active=require_active,
+        )
 
         issue_counts: Dict[str, int] = {}
         for it in issues or []:
