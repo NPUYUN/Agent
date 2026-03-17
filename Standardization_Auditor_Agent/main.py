@@ -354,7 +354,7 @@ if __name__ == "__main__":
         help="输出路径：目录或 .json 文件路径。\n"
              "- 目录：Markdown 报告输出到该目录\n"
              "- .json：除 Markdown 外，额外生成该 JSON 汇总文件\n"
-             "默认：./report",
+             "默认：项目根目录的 paper 文件夹",
     )
     args = parser.parse_args()
 
@@ -509,8 +509,9 @@ if __name__ == "__main__":
 
             # 7. Generate Markdown Reports
             # Determine output directory
-            # Default to "report" folder in the current working directory
-            output_dir = os.path.join(os.getcwd(), "report")
+            # Default to repository-root 'paper' folder
+            repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            output_dir = os.path.join(repo_root, "paper")
             
             if args.output:
                 # If extension exists, treat as file path and get its directory

@@ -149,7 +149,7 @@ python main.py --pdf "path/to/your/paper.pdf"
 ```
 
 **输出结果**：
-默认会在当前目录下的 `report` 文件夹生成两份报告：
+默认会在项目根目录的 `paper` 文件夹生成两份报告（已在 .gitignore 中忽略，不会提交到仓库）：
 - `*_score_report.md`: 评分报告（总分、评级、各类问题统计）。
 - `*_deduction_details.md`: 扣分细则（包含 CV 视觉布局分析 和 LLM 语义内容分析的详细问题列表）。
 
