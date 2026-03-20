@@ -145,7 +145,7 @@ python ensure_db.py
 
 ```bash
 cd Standardization_Auditor_Agent
-python main.py --pdf "path/to/your/paper.pdf"
+python scripts/cli_audit.py --pdf "path/to/your/paper.pdf"
 ```
 
 **输出结果**：

@@ -9,6 +9,7 @@ load_dotenv(override=False)
 # Agent基本信息
 AGENT_NAME = "Standardization_Auditor_Agent"
 AGENT_VERSION = "v1.1"  # Updated version
+AGENT_CODE = os.getenv("AGENT_CODE", "FMT").strip() or "FMT"
 
 # 环境配置
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()

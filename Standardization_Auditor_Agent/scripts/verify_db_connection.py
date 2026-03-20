@@ -100,7 +100,7 @@ async def _sql_probe(database_url: str, write_check: bool) -> Dict[str, Any]:
             ).scalar_one()
 
             checks = []
-            for t in ["review_tasks", "paper_sections", "expert_comments", "agent_rules", "ground_truth_issues"]:
+            for t in ["review_tasks", "paper_sections", "expert_comments", "agent_audit_result", "agent_rules", "ground_truth_issues"]:
                 has_table = (
                     await conn.execute(
                         text(

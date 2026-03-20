@@ -3,6 +3,7 @@ import sys
 import time
 import asyncio
 import re
+import uuid
 from typing import Any, Dict
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request
@@ -32,7 +33,7 @@ from core.pdf_utils import open_pdf
 from core.database import db_manager, ReviewTask, TaskStatus
 from core.rule_engine import RuleEngine
 from utils.logger import setup_logger, set_request_id, reset_request_id
-from config import AGENT_NAME, AGENT_VERSION, AuditTag, LAYOUT_ANALYSIS_TIMEOUT, LLM_PROVIDER, DATABASE_URL, mask_database_url
+from config import AGENT_NAME, AGENT_VERSION, AGENT_CODE, AuditTag, LAYOUT_ANALYSIS_TIMEOUT, LLM_PROVIDER, DATABASE_URL, mask_database_url
 from sqlalchemy import select, text
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -167,28 +168,49 @@ async def _fetch_content_from_db(session, paper_id: str, chunk_id: str) -> str |
     chunk_id_str = str(chunk_id)
     chunk_int = _extract_first_int(chunk_id_str)
 
-    attempts: list[tuple[str, dict]] = [
-        (
-            "select content from paper_sections where paper_id = cast(:paper_id as uuid) and chunk_id = :chunk_id limit 1",
-            {"paper_id": paper_id_str, "chunk_id": chunk_id_str},
-        ),
-        (
-            "select section_content from paper_sections where paper_id = cast(:paper_id as uuid) and section_name = :chunk_id limit 1",
-            {"paper_id": paper_id_str, "chunk_id": chunk_id_str},
-        ),
-        (
-            "select section_content from paper_sections where paper_id = cast(:paper_id as uuid) and replace(section_name, ' ', '') = replace(:chunk_id, ' ', '') limit 1",
-            {"paper_id": paper_id_str, "chunk_id": chunk_id_str},
-        ),
-    ]
-    if chunk_int is not None:
-        attempts.insert(
-            1,
-            (
-                "select section_content from paper_sections where paper_id = cast(:paper_id as uuid) and section_id = :sid limit 1",
-                {"paper_id": paper_id_str, "sid": chunk_int},
-            ),
+    cols: set[str] = set()
+    try:
+        rows = await session.execute(
+            text(
+                """
+                select column_name
+                from information_schema.columns
+                where table_schema = 'public' and table_name = 'paper_sections'
+                """
+            )
         )
+        cols = {str(r[0]) for r in (rows.fetchall() or []) if r and r[0]}
+    except Exception:
+        cols = set()
+
+    content_cols = [c for c in ("content", "section_content") if c in cols]
+    if not content_cols:
+        return None
+
+    attempts: list[tuple[str, dict]] = []
+    for content_col in content_cols:
+        if "section_name" in cols:
+            attempts.append(
+                (
+                    f"select {content_col} from paper_sections where paper_id = cast(:paper_id as uuid) and section_name = :chunk_id limit 1",
+                    {"paper_id": paper_id_str, "chunk_id": chunk_id_str},
+                )
+            )
+            attempts.append(
+                (
+                    f"select {content_col} from paper_sections where paper_id = cast(:paper_id as uuid) and replace(section_name, ' ', '') = replace(:chunk_id, ' ', '') limit 1",
+                    {"paper_id": paper_id_str, "chunk_id": chunk_id_str},
+                )
+            )
+        if chunk_int is not None and "section_id" in cols:
+            attempts.insert(
+                0,
+                (
+                    f"select {content_col} from paper_sections where paper_id = cast(:paper_id as uuid) and section_id = :sid limit 1",
+                    {"paper_id": paper_id_str, "sid": chunk_int},
+                ),
+            )
+    if chunk_int is not None:
         attempts.append(
             (
                 "select review_content from reviews where paper_id = cast(:paper_id as uuid) and (review_id = :sid or section_id = :sid) limit 1",
@@ -214,6 +236,208 @@ async def _fetch_content_from_db(session, paper_id: str, chunk_id: str) -> str |
                 pass
             continue
     return None
+
+
+def _normalize_level(level: Any) -> str:
+    s = str(level or "").strip()
+    if not s:
+        return "Info"
+    s_low = s.lower()
+    if s_low == "critical":
+        return "Critical"
+    if s_low == "warning":
+        return "Warning"
+    if s_low == "info":
+        return "Info"
+    if s_low in {"error", "fatal"}:
+        return "Critical"
+    if s_low in {"warn"}:
+        return "Warning"
+    return s[:1].upper() + s[1:].lower()
+
+
+def _rule_id_from_issue_type(issue_type: Any) -> str:
+    t = str(issue_type or "").strip()
+    mapping = {
+        "Citation_Inconsistency": f"{AGENT_CODE}-001",
+        "Citation_Style_Inconsistent": f"{AGENT_CODE}-002",
+        "Label_Missing": f"{AGENT_CODE}-003",
+        "Hierarchy_Fault": f"{AGENT_CODE}-004",
+        "Punctuation_Mixed": f"{AGENT_CODE}-005",
+        "Punctuation_Error": f"{AGENT_CODE}-005",
+        "Typo_Error": f"{AGENT_CODE}-006",
+        "Typo_Limit_Exceeded": f"{AGENT_CODE}-006",
+        "Formula_Readability": f"{AGENT_CODE}-007",
+        "Formula_Missing": f"{AGENT_CODE}-008",
+        "Formula_Ref_Missing": f"{AGENT_CODE}-009",
+        "Formula_Misaligned": f"{AGENT_CODE}-010",
+        "Formatting_Issue": f"{AGENT_CODE}-011",
+        "Experiment_Result_Question": f"{AGENT_CODE}-012",
+    }
+    return mapping.get(t, f"{AGENT_CODE}-AUTO-{t or 'Other'}")
+
+
+def _point_from_issue_type(issue_type: Any) -> str:
+    t = str(issue_type or "").strip()
+    mapping = {
+        "Citation_Inconsistency": "引用一致性",
+        "Citation_Style_Inconsistent": "参考文献格式一致性",
+        "Label_Missing": "图表题注与引用",
+        "Hierarchy_Fault": "标题层级与编号",
+        "Punctuation_Mixed": "标点符号规范",
+        "Punctuation_Error": "标点符号规范",
+        "Typo_Error": "错别字/书写错误",
+        "Typo_Limit_Exceeded": "错别字红线",
+        "Formula_Readability": "公式可读性",
+        "Formula_Missing": "公式编号规范",
+        "Formula_Ref_Missing": "公式引用规范",
+        "Formula_Misaligned": "公式排版规范",
+        "Formatting_Issue": "排版与格式",
+        "Experiment_Result_Question": "实验结果疑问",
+    }
+    return mapping.get(t, t or "其他")
+
+
+def _score_from_level(level: Any) -> int:
+    lvl = _normalize_level(level)
+    if lvl == "Critical":
+        return 5
+    if lvl == "Warning":
+        return 3
+    return 1
+
+
+def _build_agent_audit_result_payload(request: AuditRequest, debug: Dict[str, Any] | None) -> Dict[str, Any]:
+    issues = []
+    if isinstance(debug, dict):
+        raw = debug.get("issues")
+        if isinstance(raw, list):
+            issues = raw
+
+    audit_results = []
+    paper_id = str(getattr(request.metadata, "paper_id", "") or "")
+
+    for idx, issue in enumerate(issues, start=1):
+        if not isinstance(issue, dict):
+            continue
+        issue_type = issue.get("issue_type")
+        level = _normalize_level(issue.get("severity") or issue.get("level"))
+        page_num = issue.get("page_num")
+        bbox = issue.get("bbox")
+        section = ""
+        if page_num is not None and page_num != "":
+            section = f"p{page_num}"
+        line_start = None
+        if isinstance(bbox, (list, tuple)) and len(bbox) == 4:
+            try:
+                line_start = int(float(bbox[1]))
+            except Exception:
+                line_start = None
+
+        audit_results.append(
+            {
+                "result_id": f"item-{idx:03d}",
+                "paper_id": paper_id,
+                "point": _point_from_issue_type(issue_type),
+                "rule_id": _rule_id_from_issue_type(issue_type),
+                "score": _score_from_level(level),
+                "level": level,
+                "description": str(issue.get("message") or "").strip(),
+                "evidence_quote": str(issue.get("evidence") or "").strip(),
+                "location": {"section": section, "line_start": line_start},
+                "suggestion": str(issue.get("suggestion") or "").strip(),
+            }
+        )
+
+    return {"agent_code": AGENT_CODE, "audit_results": audit_results}
+
+
+async def _get_table_columns(session, table_name: str) -> set[str]:
+    sql = """
+    select column_name
+    from information_schema.columns
+    where table_schema = 'public' and table_name = :t
+    """
+    rows = await session.execute(text(sql), {"t": table_name})
+    cols = {str(r[0]) for r in (rows.fetchall() or []) if r and r[0]}
+    return cols
+
+
+async def _upsert_agent_audit_result(
+    session,
+    request: AuditRequest,
+    status: TaskStatus,
+    error_msg: str | None,
+    debug: Dict[str, Any] | None,
+) -> None:
+    cols = await _get_table_columns(session, "agent_audit_result")
+    if not cols:
+        return
+
+    payload = _build_agent_audit_result_payload(request, debug)
+
+    data: Dict[str, Any] = {}
+    if "result_json" in cols:
+        data["result_json"] = payload
+    if "agent_code" in cols:
+        data["agent_code"] = AGENT_CODE
+    if "agent_name" in cols:
+        data["agent_name"] = AGENT_NAME
+    if "agent_version" in cols:
+        data["agent_version"] = AGENT_VERSION
+    if "status" in cols:
+        data["status"] = status.value
+    if "error_msg" in cols:
+        data["error_msg"] = error_msg
+    if "request_id" in cols:
+        data["request_id"] = str(request.request_id)
+    if "task_id" in cols:
+        try:
+            data["task_id"] = uuid.UUID(str(request.request_id))
+        except Exception:
+            pass
+    if "paper_id" in cols:
+        try:
+            data["paper_id"] = uuid.UUID(str(request.metadata.paper_id))
+        except Exception:
+            data["paper_id"] = str(request.metadata.paper_id)
+    if "chunk_id" in cols:
+        data["chunk_id"] = str(request.metadata.chunk_id)
+
+    key_cols = [c for c in ["request_id", "task_id", "paper_id", "chunk_id", "agent_code"] if c in cols and c in data]
+    exists = False
+    if key_cols:
+        where = " and ".join([f"{c} = :{c}" for c in key_cols])
+        check_sql = f"select 1 from agent_audit_result where {where} limit 1"
+        exists = (await session.execute(text(check_sql), {c: data[c] for c in key_cols})).first() is not None
+
+    if exists and key_cols:
+        set_cols = [c for c in data.keys() if c not in set(key_cols)]
+        if not set_cols:
+            return
+        sets = []
+        for c in set_cols:
+            if c == "result_json":
+                sets.append(f"{c} = :{c}::jsonb")
+            else:
+                sets.append(f"{c} = :{c}")
+        where = " and ".join([f"{c} = :{c}" for c in key_cols])
+        upd_sql = f"update agent_audit_result set {', '.join(sets)} where {where}"
+        await session.execute(text(upd_sql), data)
+        return
+
+    insert_cols = list(data.keys())
+    if not insert_cols:
+        return
+    vals = []
+    for c in insert_cols:
+        if c == "result_json":
+            vals.append(f":{c}::jsonb")
+        else:
+            vals.append(f":{c}")
+    ins_sql = f"insert into agent_audit_result ({', '.join(insert_cols)}) values ({', '.join(vals)})"
+    await session.execute(text(ins_sql), data)
+
 
 async def save_result_to_db(
     request: AuditRequest,
@@ -262,10 +486,14 @@ async def save_result_to_db(
             task.error_msg = error_msg
             task.usage_tokens = response.usage.tokens if response else 0
             task.latency_ms = response.usage.latency_ms if response else 0
+
+            await _upsert_agent_audit_result(session, request, status, error_msg, debug)
+
             await session.commit()
             logger.info(f"Task {request.request_id} saved to DB (status={status}).")
     except Exception as e:
         logger.error(f"Failed to save task to DB: {type(e).__name__}: {e!r}")
+        raise
 
 @app.post("/audit", response_model=AuditResponse, tags=["Audit"], summary="执行论文格式审计")
 async def audit_paper(request: AuditRequest):
@@ -278,7 +506,10 @@ async def audit_paper(request: AuditRequest):
     logger.info(f"Received audit request for paper {request.metadata.paper_id}")
 
     try:
-        await save_result_to_db(request, None, TaskStatus.RUNNING)
+        try:
+            await save_result_to_db(request, None, TaskStatus.RUNNING)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"DB write failed (RUNNING): {type(e).__name__}")
 
         # Check if content is provided, if not fetch from DB
         content = request.payload.content
@@ -387,7 +618,10 @@ async def audit_paper(request: AuditRequest):
         
     except Exception as e:
         # 记录失败状态
-        await save_result_to_db(request, None, TaskStatus.FAILED, error_msg=str(e), debug={"error": str(e)})
+        try:
+            await save_result_to_db(request, None, TaskStatus.FAILED, error_msg=str(e), debug={"error": str(e)})
+        except Exception:
+            pass
         raise e
     finally:
         reset_request_id(token)
@@ -434,341 +668,5 @@ LAYOUT_TIMEOUT: {LAYOUT_ANALYSIS_TIMEOUT}s
     return HTMLResponse(content=html_content)
 
 if __name__ == "__main__":
-    import argparse
     import uvicorn
-
-    parser = argparse.ArgumentParser(
-        description="Standardization Auditor Agent\n\n"
-                    "用法：\n"
-                    "- 不带参数：启动 FastAPI 服务\n"
-                    "- 带 --pdf：直接审计本地 PDF 并生成报告",
-        formatter_class=argparse.RawTextHelpFormatter,
-    )
-    parser.add_argument("--pdf", help="本地 PDF 文件路径（启用 CLI 审计模式）")
-    parser.add_argument(
-        "--pages",
-        help="仅审计指定页码（可用逗号分隔与范围）：例如 1,2,10-12。默认：审计全部页",
-    )
-    parser.add_argument(
-        "--output",
-        help="输出路径：目录或 .json 文件路径。\n"
-             "- 目录：Markdown 报告输出到该目录\n"
-             "- .json：除 Markdown 外，额外生成该 JSON 汇总文件\n"
-             "默认：项目根目录的 paper 文件夹",
-    )
-    args = parser.parse_args()
-
-    if args.pdf:
-        import fitz
-        import json
-        import numpy as np
-        import math
-        import re
-        from datetime import datetime
-
-        class NpEncoder(json.JSONEncoder):
-            def default(self, obj):
-                if isinstance(obj, np.integer):
-                    return int(obj)
-                if isinstance(obj, np.floating):
-                    return float(obj)
-                if isinstance(obj, np.ndarray):
-                    return obj.tolist()
-                return super().default(obj)
-
-        def _parse_pages_spec(spec: str | None) -> list[int] | None:
-            if not spec:
-                return None
-            raw = str(spec).strip()
-            if not raw:
-                return None
-            out: set[int] = set()
-            for part in re.split(r"[,\s]+", raw):
-                p = part.strip()
-                if not p:
-                    continue
-                if "-" in p:
-                    a, b = (x.strip() for x in p.split("-", 1))
-                    if not a.isdigit() or not b.isdigit():
-                        continue
-                    start, end = int(a), int(b)
-                    if start <= 0 or end <= 0:
-                        continue
-                    if end < start:
-                        start, end = end, start
-                    for n in range(start, end + 1):
-                        out.add(n)
-                    continue
-                if p.isdigit():
-                    n = int(p)
-                    if n > 0:
-                        out.add(n)
-            if not out:
-                return None
-            return sorted(out)
-
-        async def run_audit():
-            # Load rules
-            await rule_engine.load_rules_from_db()
-            
-            # Update components
-            layout_analyzer.update_rules(rule_engine.rules)
-            semantic_checker.update_rules(rule_engine.rules)
-
-            pdf_path = args.pdf
-            if not os.path.exists(pdf_path):
-                print(f"Error: File not found: {pdf_path}")
-                return
-
-            print(f"Starting audit for: {pdf_path}")
-            selected_pages = _parse_pages_spec(args.pages)
-            selected_set = set(selected_pages or [])
-            
-            # 1. Extract text
-            doc = fitz.open(pdf_path)
-            text_content = ""
-            for idx, page in enumerate(doc):
-                page_num = idx + 1
-                if selected_pages and page_num not in selected_set:
-                    continue
-                text_content += page.get_text()
-            
-            # 2. Layout Analysis
-            print("Running Layout Analysis...")
-            try:
-                layout_input = {"pdf_path": pdf_path, "pages": selected_pages} if selected_pages else pdf_path
-                layout_data = await asyncio.wait_for(layout_analyzer.analyze(layout_input), timeout=LAYOUT_ANALYSIS_TIMEOUT)
-            except asyncio.TimeoutError:
-                layout_data = {
-                    "elements": [],
-                    "layout_result": {"layout_issues": []},
-                    "parse_errors": [{"error_type": "layout_timeout", "message": "layout analysis timeout"}],
-                    "parse_report": {"page_count": len(doc)} if doc else {},
-                }
-            except Exception as e:
-                layout_data = {
-                    "elements": [],
-                    "layout_result": {"layout_issues": []},
-                    "parse_errors": [{"error_type": "layout_error", "message": str(e)}],
-                    "parse_report": {"page_count": len(doc)} if doc else {},
-                }
-            
-            # 3. Semantic Check
-            provider = getattr(getattr(semantic_checker, "llm_client", None), "provider", "none")
-            print(f"Running Semantic Check (powered by {provider} API)...")
-            semantic_result = await semantic_checker.check(text_content, layout_data)
-            
-            # 4. Merge Issues
-            layout_issues = layout_data.get("layout_result", {}).get("layout_issues", [])
-            semantic_issues = semantic_result.get("semantic_issues", [])
-            all_issues = layout_issues + semantic_issues
-            
-            # 5. Calculate Score
-            score = semantic_checker._calculate_score(all_issues)
-            
-            # Count issues by severity
-            counts = {"Critical": 0, "Warning": 0, "Info": 0}
-            for issue in all_issues:
-                level = issue.get("severity") or issue.get("level") or "Info"
-                if level not in counts: level = "Info"
-                counts[level] += 1
-            
-            critical = counts["Critical"]
-            warning = counts["Warning"]
-            info = counts["Info"]
-
-            # Determine Audit Level
-            audit_level = "PASS"
-            if score < 60:
-                audit_level = "CRITICAL"
-            elif score < 80:
-                audit_level = "WARNING"
-            
-            # 6. Console Summary
-            print("\n" + "="*60)
-            print(f"AUDIT REPORT: {os.path.basename(pdf_path)}")
-            print(f"SCORE: {score}/100 ({audit_level})")
-            print(f"TOTAL ISSUES: {len(all_issues)}")
-            print("="*60)
-            
-            issues_by_type = {}
-            for issue in all_issues:
-                t = issue.get("issue_type", "Other")
-                if t not in issues_by_type:
-                    issues_by_type[t] = []
-                issues_by_type[t].append(issue)
-            
-            for t, issues in issues_by_type.items():
-                print(f"\n[ {t} ] - {len(issues)} issues")
-                for i, issue in enumerate(issues[:3]): # Show top 3 in console
-                    msg = issue.get("message", "")
-                    pg = issue.get("page_num", "?")
-                    print(f"  - (Page {pg}) {msg}")
-                if len(issues) > 3:
-                    print(f"  ... and {len(issues)-3} more")
-
-            # 7. Generate Markdown Reports
-            # Determine output directory
-            # Default to repository-root 'paper' folder
-            repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            output_dir = os.path.join(repo_root, "paper")
-            
-            if args.output:
-                # If extension exists, treat as file path and get its directory
-                if os.path.splitext(args.output)[1]:
-                    output_dir = os.path.dirname(args.output) or "."
-                else:
-                    # Otherwise treat as directory
-                    output_dir = args.output
-            
-            if not os.path.exists(output_dir):
-                os.makedirs(output_dir, exist_ok=True)
-
-            base_name = os.path.splitext(os.path.basename(pdf_path))[0]
-            score_report_path = os.path.join(output_dir, f"{base_name}_score_report.md")
-            deduction_report_path = os.path.join(output_dir, f"{base_name}_deduction_details.md")
-
-            # Generate Score Report
-            with open(score_report_path, "w", encoding="utf-8") as f:
-                f.write(f"# 论文格式审计评分报告\n\n")
-                f.write(f"**文件名**: {os.path.basename(pdf_path)}\n\n")
-                f.write(f"**审计时间**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-                f.write(f"## 审计结果\n")
-                f.write(f"- **总分**: {score}/100\n")
-                f.write(f"- **评级**: {audit_level}\n")
-                f.write(f"- **问题总数**: {len(all_issues)}\n\n")
-                
-                f.write("## 问题统计\n")
-                f.write(f"- **Critical (严重)**: {critical}\n")
-                f.write(f"- **Warning (警告)**: {warning}\n")
-                f.write(f"- **Info (提示)**: {info}\n\n")
-                
-                f.write("## 评分说明\n")
-                f.write("本系统采用非线性扣分机制，避免单一类问题导致分数过低：\n")
-                scoring = getattr(semantic_checker, "rules", {}) or {}
-                scoring_cfg = scoring.get("scoring", {}) if isinstance(scoring, dict) else {}
-                critical_w = float(scoring_cfg.get("critical_weight", 5.0) or 5.0)
-                warning_w = float(scoring_cfg.get("warning_weight", 2.0) or 2.0)
-                info_w = float(scoring_cfg.get("info_weight", 0.5) or 0.5)
-                f.write(f"- **Critical**: 权重 {critical_w:g} (线性扣分)\n")
-                f.write(f"- **Warning**: 权重 {warning_w:g} (平方根非线性扣分)\n")
-                f.write(f"- **Info**: 权重 {info_w:g} (平方根非线性扣分)\n\n")
-                
-                deduction = critical_w * critical + warning_w * math.sqrt(warning) + info_w * math.sqrt(info)
-                f.write(f"**总扣分计算**: `{critical_w:g} * {critical} + {warning_w:g} * sqrt({warning}) + {info_w:g} * sqrt({info})` ≈ `{deduction:.2f}`\n")
-                f.write(f"**最终得分**: `100 - {int(round(deduction))}` = `{score}`\n")
-
-            # Generate Deduction Details Report
-            with open(deduction_report_path, "w", encoding="utf-8") as f:
-                f.write(f"# 论文格式审计扣分细则\n\n")
-                f.write(f"**文件名**: {os.path.basename(pdf_path)}\n")
-                f.write(f"**生成时间**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-
-                def _norm_text(value: object) -> str:
-                    s = "" if value is None else str(value)
-                    s = re.sub(r"\s+", " ", s).strip()
-                    return s
-
-                def _fmt_bbox(bbox: object) -> str:
-                    if isinstance(bbox, (list, tuple)) and len(bbox) == 4:
-                        try:
-                            x0, y0, x1, y1 = [float(x) for x in bbox]
-                            return f"[{x0:.1f}, {y0:.1f}, {x1:.1f}, {y1:.1f}]"
-                        except Exception:
-                            return _norm_text(bbox)
-                    return ""
-
-                def _write_issue_detail(issue: dict):
-                    evidence = issue.get("evidence")
-                    bbox = issue.get("bbox")
-                    location = issue.get("location") if isinstance(issue.get("location"), dict) else {}
-                    if not bbox and isinstance(location, dict):
-                        bbox = location.get("bbox")
-                    bbox_str = _fmt_bbox(bbox)
-                    if bbox_str:
-                        f.write(f"- **BBox**: {bbox_str}\n")
-                    if evidence:
-                        ev = _norm_text(evidence)
-                        if ev:
-                            if len(ev) <= 120:
-                                f.write(f"- **证据**: `{ev}`\n")
-                            else:
-                                f.write(f"- **证据**:\n\n```\n{ev}\n```\n")
-                
-                if not all_issues:
-                    f.write("恭喜！未发现明显的格式问题。\n")
-                else:
-                    # 1. Layout Analysis (CV)
-                    f.write("## 1. 视觉布局分析 (CV Layout Analysis)\n")
-                    if not layout_issues:
-                        f.write("未发现布局问题。\n\n")
-                    else:
-                        layout_by_type = {}
-                        for issue in layout_issues:
-                            t = issue.get("issue_type", "Other")
-                            if t not in layout_by_type: layout_by_type[t] = []
-                            layout_by_type[t].append(issue)
-                        
-                        for t, issues in layout_by_type.items():
-                            f.write(f"### {t} ({len(issues)} 个问题)\n")
-                            for i, issue in enumerate(issues):
-                                msg = issue.get("message", "无描述")
-                                pg = issue.get("page_num", "?")
-                                severity = issue.get("severity", "Info")
-                                suggestion = issue.get("suggestion", "")
-                                
-                                f.write(f"#### {i+1}. [Page {pg}] {msg}\n")
-                                f.write(f"- **严重程度**: {severity}\n")
-                                if isinstance(issue, dict):
-                                    _write_issue_detail(issue)
-                                if suggestion:
-                                    f.write(f"- **修改建议**: {suggestion}\n")
-                                f.write("\n")
-                    
-                    f.write("\n")
-
-                    # 2. Semantic Analysis (LLM)
-                    f.write("## 2. 语义内容分析 (LLM Semantic Analysis)\n")
-                    if not semantic_issues:
-                        f.write("未发现语义问题。\n\n")
-                    else:
-                        semantic_by_type = {}
-                        for issue in semantic_issues:
-                            t = issue.get("issue_type", "Other")
-                            if t not in semantic_by_type: semantic_by_type[t] = []
-                            semantic_by_type[t].append(issue)
-                        
-                        for t, issues in semantic_by_type.items():
-                            f.write(f"### {t} ({len(issues)} 个问题)\n")
-                            for i, issue in enumerate(issues):
-                                msg = issue.get("message", "无描述")
-                                pg = issue.get("page_num", "?")
-                                severity = issue.get("severity", "Info")
-                                suggestion = issue.get("suggestion", "")
-                                
-                                f.write(f"#### {i+1}. [Page {pg}] {msg}\n")
-                                f.write(f"- **严重程度**: {severity}\n")
-                                if isinstance(issue, dict):
-                                    _write_issue_detail(issue)
-                                if suggestion:
-                                    f.write(f"- **修改建议**: {suggestion}\n")
-                                f.write("\n")
-
-            print(f"\nReports generated successfully:")
-            print(f"1. Score Report: {score_report_path}")
-            print(f"2. Deduction Details: {deduction_report_path}")
-
-            if args.output and args.output.endswith('.json'):
-                report = {
-                    "file": pdf_path,
-                    "score": score,
-                    "issues": all_issues
-                }
-                with open(args.output, "w", encoding="utf-8") as f:
-                    json.dump(report, f, cls=NpEncoder, ensure_ascii=False, indent=2)
-                print(f"3. JSON Report: {args.output}")
-
-        asyncio.run(run_audit())
-        
-    else:
-        uvicorn.run(app, host="127.0.0.1", port=8000)
+    uvicorn.run(app, host="127.0.0.1", port=8000)

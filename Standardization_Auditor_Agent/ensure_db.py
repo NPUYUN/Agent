@@ -62,7 +62,7 @@ def _build_db_url_from_env() -> str | None:
         + name
     )
 
-_CORE_TABLES = ("paper_sections", "expert_comments", "review_tasks")
+_CORE_TABLES = ("paper_sections", "expert_comments", "review_tasks", "agent_audit_result")
 _OPTIONAL_TABLES = ("agent_rules", "ground_truth_issues")
 _PUBLIC_SCHEMA = "public"
 _REVIEW_STATUS_ENUM = ("PENDING", "RUNNING", "SUCCESS", "FAILED", "TIMEOUT")
@@ -244,6 +244,7 @@ async def _ensure_table_paper_sections(conn):
             section_id SERIAL PRIMARY KEY,
             paper_id UUID NOT NULL,
             section_name VARCHAR,
+            content TEXT,
             section_content TEXT,
             content_vector vector(768)
         );
@@ -254,6 +255,38 @@ async def _ensure_table_paper_sections(conn):
         return
 
     await _try_exec(conn, "CREATE INDEX IF NOT EXISTS ix_paper_sections_paper_id ON paper_sections (paper_id);")
+    await _try_exec(conn, "CREATE INDEX IF NOT EXISTS ix_paper_sections_paper_section ON paper_sections (paper_id, section_name);")
+
+
+async def _ensure_table_agent_audit_result(conn):
+    ok, err = await _try_exec(
+        conn,
+        """
+        CREATE TABLE IF NOT EXISTS agent_audit_result (
+            id BIGSERIAL PRIMARY KEY,
+            request_id TEXT,
+            task_id UUID,
+            paper_id UUID,
+            chunk_id TEXT,
+            agent_code TEXT,
+            agent_name TEXT,
+            agent_version TEXT,
+            status TEXT,
+            error_msg TEXT,
+            result_json JSONB DEFAULT '{}'::jsonb,
+            created_at TIMESTAMP DEFAULT NOW(),
+            updated_at TIMESTAMP DEFAULT NOW()
+        );
+        """,
+    )
+    if not ok:
+        print(f"❌ Failed to create agent_audit_result: {type(err).__name__}: {err}")
+        return
+
+    await _try_exec(conn, "CREATE INDEX IF NOT EXISTS ix_agent_audit_result_request_id ON agent_audit_result (request_id);")
+    await _try_exec(conn, "CREATE INDEX IF NOT EXISTS ix_agent_audit_result_paper_id ON agent_audit_result (paper_id);")
+    await _try_exec(conn, "CREATE INDEX IF NOT EXISTS ix_agent_audit_result_paper_chunk ON agent_audit_result (paper_id, chunk_id);")
+    await _try_exec(conn, "CREATE INDEX IF NOT EXISTS ix_agent_audit_result_agent_code ON agent_audit_result (agent_code);")
 
 
 async def _ensure_table_expert_comments(conn):
@@ -596,12 +629,14 @@ async def ensure_tables_exist(database_url: str, db_name: str):
             await _ensure_table_paper_sections(conn)
             await _ensure_table_expert_comments(conn)
             await _ensure_table_review_tasks(conn)
+            await _ensure_table_agent_audit_result(conn)
             await _ensure_table_agent_rules(conn)
             await _ensure_table_ground_truth_issues(conn)
 
             can_paper, ctx_paper = await _ddl_allowed(conn, "paper_sections")
             can_expert, ctx_expert = await _ddl_allowed(conn, "expert_comments")
             can_review, ctx_review = await _ddl_allowed(conn, "review_tasks")
+            can_audit, ctx_audit = await _ddl_allowed(conn, "agent_audit_result")
             can_rules, ctx_rules = await _ddl_allowed(conn, "agent_rules")
             can_gt, ctx_gt = await _ddl_allowed(conn, "ground_truth_issues")
 
@@ -612,14 +647,44 @@ async def ensure_tables_exist(database_url: str, db_name: str):
                     "section_id": {"type": "integer", "ddl": None},
                     "paper_id": {"type": "uuid", "ddl": "ALTER TABLE paper_sections ADD COLUMN IF NOT EXISTS paper_id UUID;"},
                     "section_name": {"type": "text", "ddl": "ALTER TABLE paper_sections ADD COLUMN IF NOT EXISTS section_name VARCHAR;"},
+                    "content": {"type": "text", "ddl": "ALTER TABLE paper_sections ADD COLUMN IF NOT EXISTS content TEXT;"},
                     "section_content": {"type": "text", "ddl": "ALTER TABLE paper_sections ADD COLUMN IF NOT EXISTS section_content TEXT;"},
                     "content_vector": {"type": "vector", "ddl": "ALTER TABLE paper_sections ADD COLUMN IF NOT EXISTS content_vector vector(768);"},
                 },
                 required_indexes=[
                     ("ix_paper_sections_paper_id", ["paper_id"], False),
+                    ("ix_paper_sections_paper_section", ["paper_id", "section_name"], False),
                 ],
                 can_ddl=can_paper,
                 ddl_context=ctx_paper,
+            )
+
+            await _check_and_patch_table(
+                conn,
+                "agent_audit_result",
+                required_cols={
+                    "id": {"type": "bigint", "ddl": None},
+                    "request_id": {"type": "text", "ddl": "ALTER TABLE agent_audit_result ADD COLUMN IF NOT EXISTS request_id TEXT;"},
+                    "task_id": {"type": "uuid", "ddl": "ALTER TABLE agent_audit_result ADD COLUMN IF NOT EXISTS task_id UUID;"},
+                    "paper_id": {"type": "uuid", "ddl": "ALTER TABLE agent_audit_result ADD COLUMN IF NOT EXISTS paper_id UUID;"},
+                    "chunk_id": {"type": "text", "ddl": "ALTER TABLE agent_audit_result ADD COLUMN IF NOT EXISTS chunk_id TEXT;"},
+                    "agent_code": {"type": "text", "ddl": "ALTER TABLE agent_audit_result ADD COLUMN IF NOT EXISTS agent_code TEXT;"},
+                    "agent_name": {"type": "text", "ddl": "ALTER TABLE agent_audit_result ADD COLUMN IF NOT EXISTS agent_name TEXT;"},
+                    "agent_version": {"type": "text", "ddl": "ALTER TABLE agent_audit_result ADD COLUMN IF NOT EXISTS agent_version TEXT;"},
+                    "status": {"type": "text", "ddl": "ALTER TABLE agent_audit_result ADD COLUMN IF NOT EXISTS status TEXT;"},
+                    "error_msg": {"type": "text", "ddl": "ALTER TABLE agent_audit_result ADD COLUMN IF NOT EXISTS error_msg TEXT;"},
+                    "result_json": {"type": "jsonb", "ddl": "ALTER TABLE agent_audit_result ADD COLUMN IF NOT EXISTS result_json JSONB DEFAULT '{}'::jsonb;"},
+                    "created_at": {"type": "timestamp", "ddl": "ALTER TABLE agent_audit_result ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW();"},
+                    "updated_at": {"type": "timestamp", "ddl": "ALTER TABLE agent_audit_result ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW();"},
+                },
+                required_indexes=[
+                    ("ix_agent_audit_result_request_id", ["request_id"], False),
+                    ("ix_agent_audit_result_paper_id", ["paper_id"], False),
+                    ("ix_agent_audit_result_paper_chunk", ["paper_id", "chunk_id"], False),
+                    ("ix_agent_audit_result_agent_code", ["agent_code"], False),
+                ],
+                can_ddl=can_audit,
+                ddl_context=ctx_audit,
             )
 
             await _check_and_patch_table(
