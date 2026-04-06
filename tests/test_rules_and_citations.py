@@ -4,7 +4,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 
-AGENT_DIR = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[1]
+AGENT_DIR = REPO_ROOT / "src" / "standardization_auditor_agent"
 if str(AGENT_DIR) not in sys.path:
     sys.path.insert(0, str(AGENT_DIR))
 
@@ -77,4 +78,3 @@ class TestCitationReferenceMatch(unittest.TestCase):
         cites = [SimpleNamespace(content="[20]", page_num=1, bbox=[0, 0, 1, 1])]
         issues = check_citation_reference_match(cites, refs)
         self.assertEqual(issues, [])
-

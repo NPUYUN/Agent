@@ -5,7 +5,8 @@ import unittest
 from pathlib import Path
 
 
-AGENT_DIR = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[1]
+AGENT_DIR = REPO_ROOT / "src" / "standardization_auditor_agent"
 if str(AGENT_DIR) not in sys.path:
     sys.path.insert(0, str(AGENT_DIR))
 
@@ -35,7 +36,7 @@ class TestRegressionSamplesManifest(unittest.TestCase):
         manifest = AGENT_DIR / "scripts" / "regression_samples.json"
         data = json.loads(manifest.read_text(encoding="utf-8"))
 
-        repo_root = AGENT_DIR.parent
+        repo_root = REPO_ROOT
         missing = []
         for s in data.get("samples", []) or []:
             rel = str(s.get("path") or "").strip()
@@ -46,4 +47,3 @@ class TestRegressionSamplesManifest(unittest.TestCase):
                 missing.append(rel)
 
         self.assertEqual(missing, [])
-

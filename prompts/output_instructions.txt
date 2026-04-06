@@ -1,0 +1,22 @@
+请输出 JSON 格式的审计报告。
+返回格式示例：
+{
+  "issues": [
+    {
+      "issue_type": "Citation_Inconsistency",
+      "severity": "Warning",
+      "location": "Page 1, Paragraph 2",
+      "evidence": "[1]",
+      "message": "引用格式不一致，前文使用 (Author, Year)",
+      "suggestion": "建议统一为 (Author, Year) 格式"
+    }
+  ],
+  "summary": "简要总结..."
+}
+
+如果没有发现明显问题，请返回空数组：
+{
+  "issues": [],
+  "summary": "本片段格式规范，未发现明显排版或语义错误。"
+}
+

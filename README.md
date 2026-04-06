@@ -7,7 +7,7 @@
 系统基于 **FastAPI (异步)** 构建，严格遵循**四层闭环数据流向**与**三步闭环逻辑**。
 
 ```
-Standardization_Auditor_Agent/
+src/standardization_auditor_agent/
 ├── core/                       # 核心业务逻辑
 │   ├── database.py             # 数据库连接管理 (Async SQLAlchemy, ReviewTask模型)
 │   ├── rule_engine.py          # 动态规则加载与管理
@@ -25,15 +25,17 @@ Standardization_Auditor_Agent/
 │   └── llm_client.py           # 统一 LLM 客户端 (支持 Gemini/Qwen/DeepSeek/Mock)
 ├── utils/                      # 通用工具库
 │   └── logger.py               # 标准化日志模块
-├── tests/                      # unittest 测试用例
 ├── scripts/                    # 运维脚本
 │   └── seed_rules.py           # 规则库入库脚本
 ├── config.py                   # 全局配置 (Prompt, Version, Tags)
 ├── rules.yaml                  # 语义校验规则配置文件 (动态可调)
 ├── models.py                   # Pydantic 数据模型 (严格遵循 API 协议)
-├── main.py                     # FastAPI 应用入口 (含生命周期与DB写入)
-├── requirements.txt            # 项目依赖 (精准版本)
-└── Dockerfile                  # 容器化构建文件
+└── main.py                     # FastAPI 应用入口 (含生命周期与DB写入)
+
+prompts/                         # Prompt 模板文件
+tests/                           # unittest 测试用例
+requirements.txt                 # 项目依赖 (精准版本)
+README.md                        # 环境要求、安装步骤、运行命令
 ```
 
 测试操作指南见项目根目录的 `测试说明.md`。
@@ -83,7 +85,6 @@ Standardization_Auditor_Agent/
 ### 2. 安装依赖
 
 ```bash
-cd Standardization_Auditor_Agent
 pip install -r requirements.txt
 ```
 
@@ -93,7 +94,7 @@ pip install -r requirements.txt
 
 1. 推荐在 Windows PowerShell 下使用 `Standardization_Auditor_Agent/set_env.local.ps1` 写入临时环境变量（该文件默认被忽略，不应提交真实 Key/密码）。
 
-2. 或者在 `Standardization_Auditor_Agent` 目录下创建/编辑 `.env`（不要提交真实 Key/密码；本仓库默认忽略所有 `.env*` 文件）：
+2. 或者在项目根目录创建/编辑 `.env`（不要提交真实 Key/密码；本仓库默认忽略所有 `.env*` 文件）：
 
 ```ini
 # LLM Configuration
@@ -131,7 +132,7 @@ LAYOUT_ANALYSIS_TIMEOUT=300
 ### 4. 初始化数据库
 
 ```bash
-python ensure_db.py
+python src/standardization_auditor_agent/ensure_db.py
 ```
 
 说明：
@@ -144,8 +145,7 @@ python ensure_db.py
 无需启动服务器，直接对本地 PDF 文件进行审计并生成 Markdown 报告。
 
 ```bash
-cd Standardization_Auditor_Agent
-python scripts/cli_audit.py --pdf "path/to/your/paper.pdf"
+python src/standardization_auditor_agent/scripts/cli_audit.py --pdf "path/to/your/paper.pdf"
 ```
 
 **输出结果**：
@@ -162,7 +162,7 @@ python scripts/cli_audit.py --pdf "path/to/your/paper.pdf"
 #### 方式二：启动 API 服务
 
 ```bash
-uvicorn main:app --reload --host 0.0.0.0 --port 8000
+uvicorn standardization_auditor_agent.main:app --app-dir src --reload --host 0.0.0.0 --port 8000
 ```
 服务默认运行在 `http://0.0.0.0:8000`。
 
@@ -171,16 +171,16 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000
 详细测试步骤请参考 [测试说明文档](测试说明.md)。
 
 - **单元测试 (unittest)**  
-  在 `Standardization_Auditor_Agent` 目录下运行：
+  在项目根目录运行：
   ```bash
   python -m unittest discover -s tests
   ```
   若 `tests/` 目录为空或未包含可运行用例，建议优先使用下方端到端示例与手动接口验证完成回归检查。
 
 - **端到端示例（PDF → 审计结果）**  
-  在 `Standardization_Auditor_Agent` 目录下运行：
+  在项目根目录运行：
   ```bash
-  python audit_client.py
+  python src/standardization_auditor_agent/audit_client.py
   ```
   - 若未指定文件，将自动生成一份包含典型格式问题的示例 PDF (`sample_audit.pdf`)，并调用已启动的 Agent 服务；
   - 终端会打印评分 (`score`)、风险等级 (`audit_level`)、问题标签 (`tags`) 以及完整 JSON 响应，便于人工核对与后续标注。
